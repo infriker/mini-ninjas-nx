@@ -1,9 +1,10 @@
 # Performance
 
-On my Nintendo Switch, gameplay runs at **40–60 FPS** (test profile: **CPU
+With the frame limit disabled, gameplay runs at **40–60 FPS** on my Nintendo Switch (test profile: **CPU
 1040 MHz, GPU 460 MHz**). The result depends on the scene and camera direction.
-The port leaves clocks to the system and does not force an overclock or impose
-a 30 FPS limit.
+The port leaves clocks to the system and does not force an overclock. The
+supplied runtime configuration targets 30 FPS, with `minininjas_fps_limit = 0`
+available to disable the additional limit. Restart after editing the setting.
 
 ## One full-screen scene
 
@@ -18,6 +19,11 @@ quarters of the draw stream or stretch a 320-pixel image.
 
 Shadows, UI, post-processing and other required passes still run. A single scene
 region does not mean a single GPU draw call.
+
+The original refraction shaders assumed a quarter-width horizontal coordinate.
+For the full-frame mode, the verified shaders scale the final horizontal sample
+coordinate by four, after the existing ripple calculation. Vertical coordinates
+and the environment cubemap lookup are unchanged.
 
 The title-scene comparison used the same emulator configuration and shader
 cache, with the last steady ten-second window from each run:

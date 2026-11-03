@@ -1,0 +1,4 @@
+# Mini Ninjas NX runtime settings. Place beside mini-ninjas.nro.
+# Target 30 FPS; 0 disables the additional frame limit.
+# Restart the game after changing this value.
+minininjas_fps_limit = 30

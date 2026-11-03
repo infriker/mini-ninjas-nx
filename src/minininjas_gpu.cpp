@@ -26,6 +26,7 @@
 
 #include "minininjas_gpu.h"
 #include "minininjas_gpu_hotpath.h"
+#include "minininjas_frame_limiter.h"
 
 #include <algorithm>
 #include <cmath>
@@ -107,6 +108,8 @@ REXCVAR_DECLARE(int32_t, deko_minininjas_full_frame_depth_info);
 REXCVAR_DECLARE(int32_t, nfsmw_dk_perfil_gpu_s);
 REXCVAR_DECLARE(int32_t, nfsmw_nativo_huellas_muestreo);
 REXCVAR_DECLARE(int32_t, nfsmw_nativo_huellas_kb_fotograma);
+REXCVAR_DEFINE_INT32(minininjas_fps_limit, 0, "MiniNinjas",
+                    "Maximum game frames per second (0 disables the limit; 1-240 supported). Restart to apply.");
 #endif
 
 namespace minininjas::gpu {
@@ -214,6 +217,9 @@ class RingGraphicsSystem final : public rex::system::IGraphicsSystem {
       return X_STATUS_SUCCESS;
     }
 #if MINININJAS_DEKO3D
+    if (!frame_limiter_.Start(REXCVAR_GET(minininjas_fps_limit))) {
+      REXLOG_WARN("[gpu] minininjas_fps_limit must be 0-240; frame limit disabled");
+    }
     // Disable shortcuts specialized for NFSMW until Mini Ninjas has been validated.
     REXCVAR_SET(nfsmw_sombras_sin_vegetacion, false);
     // 4x title-scene tiles can be 720 guest pixels tall (1440 samples).
@@ -284,6 +290,7 @@ class RingGraphicsSystem final : public rex::system::IGraphicsSystem {
       DestroyPresentation();
       return;
     }
+    frame_limiter_.Stop();
     {
       std::lock_guard<std::mutex> lock(ring_mutex_);
     }
@@ -609,6 +616,7 @@ class RingGraphicsSystem final : public rex::system::IGraphicsSystem {
       case xenos::PM4_XE_SWAP:
         // VdSwap writes "SWAP", the frontbuffer's physical address and its size. The renderer presents whatever is
         // resolved (clears and, once the ring decoder feeds draws, the frame). Handheld 1280x720.
+        if (!frame_limiter_.Wait()) break;
         counter_.fetch_add(1, std::memory_order_relaxed);
         if (EnsureRenderer()) {
           // VdSwap describes the frontbuffer in fetch constant 0; an empty TexturaSwap finds nothing (black).
@@ -994,6 +1002,7 @@ class RingGraphicsSystem final : public rex::system::IGraphicsSystem {
   std::atomic<uint32_t> counter_{0};  // vblanks + swaps, for EVENT_WRITE_SHD
   std::mutex ring_mutex_;
   std::condition_variable ring_cv_;
+  minininjas::FrameLimiter frame_limiter_;
   rex::system::object_ref<rex::system::XHostThread> ring_thread_;
   rex::system::object_ref<rex::system::XHostThread> vblank_thread_;
 

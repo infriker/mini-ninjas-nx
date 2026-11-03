@@ -14,6 +14,7 @@ dest="$ROOT/build/package/switch/mini-ninjas"
 test ! -e "$dest" || { echo "Destination already exists: $dest" >&2; exit 1; }
 mkdir -p "$dest"
 cp "$nro" "$dest/mini-ninjas.nro"
+cp "$ROOT/resources/runtime/minininjas.toml" "$dest/minininjas.toml"
 cp "$source_dir/minininjas_shaders.dslib" "$dest/minininjas_shaders.dslib"
 cp "$ROOT/LICENSE" "$ROOT/NOTICE" "$dest/"
 cp -R "$ROOT/LICENSES" "$dest/LICENSES"

@@ -28,6 +28,7 @@ def main():
         'shadercache_dksh.bin': cache,
         'LICENSE': ROOT / 'LICENSE',
         'NOTICE': ROOT / 'NOTICE',
+        'minininjas.toml': ROOT / 'resources/runtime/minininjas.toml',
     }
     for path in sorted((ROOT / 'LICENSES').rglob('*')):
         if path.is_file():

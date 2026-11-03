@@ -28,6 +28,7 @@ provide enough memory. The Windows PC version is not supported.
 ```text
 /switch/mini-ninjas/
   mini-ninjas.nro
+  minininjas.toml
   minininjas_shaders.dslib
   shadercache_dksh.bin
   game/
@@ -43,9 +44,11 @@ Keep your existing save directories when updating.
 
 ## Performance
 
-On my Nintendo Switch, gameplay runs at **40–60 FPS** depending on the scene
-(test profile: **CPU 1040 MHz, GPU 460 MHz**). The port does not force an
-overclock or a 30 FPS cap.
+With the frame limit disabled, gameplay runs at **40–60 FPS** on my Nintendo
+Switch depending on the scene (test profile: **CPU 1040 MHz, GPU 460 MHz**).
+The supplied runtime settings target **30 FPS**; set `minininjas_fps_limit = 0`
+in the runtime TOML to remove the limit. The port does not force an overclock.
+See [frame-limit settings](docs/installing.md#frame-limit).
 
 - Main scene rendered at **1280×720** with **hardware 4× MSAA**.
 - One full-screen scene region instead of the original four 320-pixel strips.

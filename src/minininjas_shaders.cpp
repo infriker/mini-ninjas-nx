@@ -28,6 +28,10 @@
 #define XXH_INLINE_ALL
 #include <xxhash.h>
 
+#if MINININJAS_FULL_FRAME
+#include "minininjas_water_spirv.h"
+#endif
+
 namespace minininjas::shaders {
 namespace {
 
@@ -230,6 +234,10 @@ struct Biblioteca::Datos {
   std::unordered_map<uint64_t, const EntradaShader*> aprendidas;     // Huella(patched microcode)
   std::unordered_map<uint64_t, const EntradaShader*> por_microcodigo;  // step 3 results, nullptr included
   std::vector<uint32_t> temporal;
+#if MINININJAS_FULL_FRAME
+  // EntradaShader stores spans: each patched module must outlive the renderer.
+  std::array<std::vector<uint32_t>, 2> water_spirv;
+#endif
   uint32_t avisos_objetos = 0, avisos_cargas = 0, avisos_direccion = 0;
 };
 
@@ -263,6 +271,18 @@ bool Biblioteca::Cargar(const std::filesystem::path& archivo) {
       if (++ignorados <= 8) REXLOG_WARN("[shaders] container {} skipped: {}", i, motivo);
       continue;
     }
+#if MINININJAS_FULL_FRAME
+    if (!e.vertices && (e.huella_contenedor == 0x6A90B5F4EDDA9DA3ull ||
+                        e.huella_contenedor == 0x1F62A0E8A64AA329ull)) {
+      auto& patched = d.water_spirv[e.huella_contenedor == 0x6A90B5F4EDDA9DA3ull ? 0 : 1];
+      if (water::Patch(e.huella_contenedor, e.spirv, patched) == water::Result::Applied) {
+        e.spirv = patched;
+      } else {
+        REXLOG_WARN("[shaders] refraction shader {:016X} differs from the verified version; retaining original",
+                    e.huella_contenedor);
+      }
+    }
+#endif
     if (const char* motivo = TipoIndicesDesdeSpirv(e)) {
       if (++ignorados <= 8) REXLOG_WARN("[shaders] container {} skipped: {}", i, motivo);
       continue;

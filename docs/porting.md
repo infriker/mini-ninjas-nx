@@ -43,8 +43,12 @@ NFSMW-NX. Those attributions are retained in the installer notices.
 - Use native 4× MSAA and replace four scene regions with one 1280×720 region.
 - Keep full-size color/depth storage scoped to the verified Mini Ninjas mode,
   leaving unrelated render passes under their existing rules.
+- Correct the original quarter-width refraction coordinates for the full-frame
+  scene, preserving the ripple calculation and environment cubemap lookup.
 - Retain cache freshness, barriers, bounds and format checks that affect
   correctness.
+- Offer a configurable frame limit at the game's Swap command without changing
+  guest time or the video-mode vblank frequency.
 
 ## Public release
 

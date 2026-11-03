@@ -37,7 +37,7 @@ Supported `default.xex`: 7,712,768 bytes, Title ID `534307E4`, SHA-256:
 ## Updates and saves
 
 Close the game before replacing files. The installer's update package replaces
-the port NRO, supplied shader package and notices without copying the game
+the port NRO, supplied shader package, default settings and notices without copying the game
 again. It does not include save files. Keep the existing game data, save
 directories and locally created cache when updating; back up the entire
 `sdmc:/switch/mini-ninjas/` directory before a major update.
@@ -45,6 +45,25 @@ directories and locally created cache when updating; back up the entire
 The game creates its own writable data beside the NRO. Do not remove those
 directories when installing a new executable. A fresh install and an update
 use the same supported game revision.
+
+## Frame limit
+
+The supplied runtime settings target 30 FPS. Edit
+`sdmc:/switch/mini-ninjas/minininjas.toml`, beside the NRO:
+
+```toml
+minininjas_fps_limit = 30
+```
+
+Set the value to `0` to disable the additional frame limit, then restart the
+game. Without this file or setting, the NRO retains its uncapped behavior.
+The limiter paces game frame submissions; it does not change game time or
+the video mode's vblank frequency. A demanding scene can still run below the
+selected limit.
+
+Keep a copy of your edited settings before extracting an update, which includes
+the default `minininjas.toml`. The source repository's root `minininjas.toml`
+is the recompilation input; the runtime template is in `resources/runtime/`.
 
 ## Distribution contents
 
