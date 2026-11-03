@@ -1,0 +1,1489 @@
+diff --git a/include/rex/rex_app.h b/include/rex/rex_app.h
+index 1f52480..5a426c3 100644
+--- a/include/rex/rex_app.h
++++ b/include/rex/rex_app.h
+@@ -107,6 +107,10 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
+   /// Called after ImGui drawer is created. Add custom dialogs here.
+   virtual void OnCreateDialogs(ui::ImGuiDrawer* drawer) { (void)drawer; }
+ 
++  /// Disable the SDK's debug/settings/console/achievement overlays and their
++  /// shortcuts while retaining the drawer for game-requested system dialogs.
++  virtual bool EnableBuiltinOverlays() const { return true; }
++
+   /// Called before cleanup begins. Release custom resources here.
+   virtual void OnShutdown() {}
+ 
+diff --git a/include/rex/ui/switch_imgui_input.h b/include/rex/ui/switch_imgui_input.h
+index aacb970..7de646c 100644
+--- a/include/rex/ui/switch_imgui_input.h
++++ b/include/rex/ui/switch_imgui_input.h
+@@ -79,6 +79,7 @@ struct EntradaUi {
+   float toque_y = 0.0f;
+   // input_xbox_layout: face buttons by position instead of by letter.
+   bool por_posicion = false;
++  bool atajos_servicio = true;
+ };
+ 
+ // What must be remembered from one frame to the next.
+@@ -150,7 +151,9 @@ inline void AplicarEntrada(ImGuiIO& io, const EntradaUi& e, EstadoEntradaUi& est
+   constexpr uint64_t kModificador = kBotonL | kBotonR;
+   constexpr uint64_t kDeAtajo =
+       kBotonArriba | kBotonAbajo | kBotonIzquierda | kBotonDerecha | kBotonZL;
+-  if ((leidos & kModificador) == kModificador) {
++  if (!e.atajos_servicio) {
++    estado.de_atajo = 0;
++  } else if ((leidos & kModificador) == kModificador) {
+     estado.de_atajo |= leidos & kDeAtajo;
+   }
+   estado.de_atajo &= leidos;
+diff --git a/include/rex/x360/deko/geometria.h b/include/rex/x360/deko/geometria.h
+index 1c5fe45..5f26ca7 100644
+--- a/include/rex/x360/deko/geometria.h
++++ b/include/rex/x360/deko/geometria.h
+@@ -140,7 +140,7 @@ class AlmacenGeometria {
+   static constexpr uint32_t kFases = 8;
+   static constexpr uint64_t kMuestrasGuardia = 20000;
+ 
+-  // The whole hash of a range and, when it has more than kFases lines, the hash of each phase into fases[].
++  // The whole hash of a range; if fases is non-null and the range has more than kFases lines, also fill phases.
+   static uint64_t Huellas(const uint8_t* datos, uint32_t bytes, uint64_t* fases);
+   // The hash of one phase; adds the bytes it read to `leidos`.
+   static uint64_t HuellaFase(const uint8_t* datos, uint32_t bytes, uint32_t fase, uint64_t& leidos);
+@@ -179,6 +179,9 @@ class AlmacenGeometria {
+   uint64_t terminado_hasta_ = 0;  // every work up to this one is done
+   uint64_t barrido_ = 0;          // frame of the last sweep
+   bool muestreo_ = false;
++  // Chosen once at Crear. A store started with sampling keeps line-fold hashes
++  // even if its sampling guard later switches muestreo_ off.
++  bool huella_completa_directa_ = false;
+   Estadisticas estadisticas_;
+ };
+ 
+diff --git a/include/rex/x360/deko/render.h b/include/rex/x360/deko/render.h
+index f661cb6..703febb 100644
+--- a/include/rex/x360/deko/render.h
++++ b/include/rex/x360/deko/render.h
+@@ -35,7 +35,9 @@
+ #include <vector>
+ 
+ #include <rex/ui/deko3d/cache_dksh.h>
++#include <rex/x360/deko/binding_cache.h>
+ #include <rex/x360/deko/geometria.h>
++#include <rex/x360/deko/horizontal_resolve.h>
+ #include <rex/ui/deko3d/nucleo.h>
+ #include <rex/x360/destinos.h>
+ #include <rex/x360/vertices_dedupe.h>
+@@ -152,6 +154,14 @@ struct EntradaVerticesDk {
+     uint32_t ubicacion, enlace, offset;
+   };
+   std::vector<Atributo> lista;  // for the diagnostics: the position's stream
++  // dsVfetch descriptors follow the original declaration order. Each distinct
++  // guest fetch slot is copied as a storage buffer in bindings 0..3.
++  struct Manual {
++    uint32_t k = 0, ranura = 0, formato = 0, offset = 0, zancada = 0, remapeo = 0;
++    bool con_signo = false, entero = false;
++  };
++  std::vector<Manual> manuales;
++  std::vector<uint32_t> ranuras_manuales;
+ };
+ 
+ class RenderDk final : public DestinosNativos {
+@@ -419,7 +429,7 @@ class RenderDk final : public DestinosNativos {
+   bool CalcularEntrada(const PeticionDibujo& p, EntradaVerticesDk& entrada);
+   uint32_t CalcularEncuadre(const uint32_t* r, uint32_t vte, bool sin_recorte, uint32_t modo_sc, float viewport[6],
+                             float ndc[4], DkScissor& tijera);
+-  bool EmpezarPase(const uint64_t claves[5], uint32_t pitch);
++  bool EmpezarPase(const uint64_t claves[5], uint32_t pitch, bool virtual_full_frame);
+   // The DKSH of a library shader for that specialization value (masked) and, for a vertex shader, the
+   // interpolators it keeps. nullptr if it cannot be had (logged once).
+   // `variante_ps` (pixel shaders): kVariante* flags (nfsmw_dk_dibujos.cpp), part of the DKSH cache key; 0 is the
+@@ -594,6 +604,8 @@ class RenderDk final : public DestinosNativos {
+   // Halo 3 resolves the 1152x640 scene and a 288x160 downscale to the same address every frame, and both are
+   // sampled. Swapped back into resueltas_ when that size is resolved again, so neither is recreated every frame.
+   std::unordered_map<uint64_t, Resuelta> resueltas_otras_;
++  rex::x360::resolve::HorizontalSequences franjas_horizontales_;
++  rex::x360::resolve::HorizontalSequences franjas_profundidad_{true};
+   static uint64_t ClaveOtra(uint32_t base, uint32_t ancho, uint32_t alto, bool profundidad) {
+     return uint64_t(base) | uint64_t(ancho & 0x3FFF) << 32 | uint64_t(alto & 0x3FFF) << 46 | uint64_t(profundidad) << 60;
+   }
+@@ -733,6 +745,7 @@ class RenderDk final : public DestinosNativos {
+     bool valido = false;
+     uint64_t pase[5] = {};
+     bool pase_valido = false;
++    bool pase_virtual_full_frame = false;
+     uint32_t pase_ancho = 0, pase_alto = 0;
+     uint64_t pase_serie = 0;  // goes up at every pass change (the framing cache depends on it)
+     const DkShader* vs = nullptr;
+@@ -754,6 +767,7 @@ class RenderDk final : public DestinosNativos {
+     std::array<DkResHandle, 32> texturas{};
+     uint32_t n_texturas = 0;
+     DkGpuAddr ubo[3] = {};
++    rex::x360::deko_bindings::BufferBindings buffer_bindings{};
+   } g_;
+   // The deferred sky: its whole state as the draw left it in g_, and what g_ does not hold.
+   struct CieloDk {
+@@ -832,6 +846,7 @@ class RenderDk final : public DestinosNativos {
+   // Vertex and index ranges kept across frames (nfsmw_dk_geometria.h, nfsmw_dk_geometria_mb).
+   deko::AlmacenGeometria geometria_;
+   deko::AlmacenGeometria::Estadisticas informe_geometria_{};
++  const bool tiempos_cpu_dibujos_;
+   // Ring thread time per draw by stage (ns, totals): preparation (indices, vertex ranges), textures, state, uploads and
+   // the draw.
+   std::array<uint64_t, 6> ns_etapas_{};  // preparing, textures, state, vertices, indices, constants and the draw
+diff --git a/include/rex/x360/shader_entry.h b/include/rex/x360/shader_entry.h
+index 27b0fee..b34e256 100644
+--- a/include/rex/x360/shader_entry.h
++++ b/include/rex/x360/shader_entry.h
+@@ -19,6 +19,14 @@ struct ElementoVertice {
+   uint16_t instruccion = 0;  // index of the fetch instruction in the microcode
+   uint8_t uso = 0;           // DeclUsage: 0 position, 3 normal, 5 texcoord, 10 color...
+   uint8_t indice_uso = 0;
++  // The shader itself fetches at a computed index, using the dsVfetch ABI.
++  bool manual = false;
++  bool redondeado = false;
++  // Unmasked original Xenos fetch index used when translating the shader.
++  // Other consumers that don't populate these fields keep valid=false.
++  uint8_t indice_registro = 0;
++  uint8_t indice_componente = 0;
++  bool indice_valido = false;
+ };
+ 
+ struct SamplerShader {
+@@ -31,6 +39,9 @@ struct EntradaShader {
+   std::span<const uint32_t> spirv;  // the translated SPIR-V, owned by the game's library
+   const void* juego = nullptr;      // opaque: the game's own container/key; the renderer never reads it
+   bool vertices = false;
++  // The vertex shader declares BLENDINDICES as float4 rather than uint4.
++  // Games must set this only after verifying the translated shader ABI.
++  bool blendindices_float = false;
+   uint32_t numero = 0;              // position in the library, for reports
+   std::vector<uint32_t> microcodigo;  // in host byte order, with the fetches masked
+   uint64_t huella = 0;              // XXH3 of that masked microcode (identification)
+diff --git a/src/codegen/builders.h b/src/codegen/builders.h
+index 24894f2..def996e 100644
+--- a/src/codegen/builders.h
++++ b/src/codegen/builders.h
+@@ -291,6 +291,7 @@ bool build_lwa(BuilderContext& ctx);
+ bool build_lwaux(BuilderContext& ctx);
+ bool build_lwax(BuilderContext& ctx);
+ bool build_lwbrx(BuilderContext& ctx);
++bool build_ldbrx(BuilderContext& ctx);
+ bool build_lwz(BuilderContext& ctx);
+ bool build_lwzu(BuilderContext& ctx);
+ bool build_lwzux(BuilderContext& ctx);
+diff --git a/src/codegen/builders/memory.cpp b/src/codegen/builders/memory.cpp
+index a20762c..2f0a4eb 100644
+--- a/src/codegen/builders/memory.cpp
++++ b/src/codegen/builders/memory.cpp
+@@ -181,6 +181,17 @@ bool build_lwbrx(BuilderContext& ctx) {
+ // Doubleword Loads
+ //=============================================================================
+ 
++bool build_ldbrx(BuilderContext& ctx) {
++  // Load a byte-reversed doubleword at (rA == 0 ? 0 : rA) + rB.
++  // The normal load converts guest big-endian data, so swap once more.
++  ctx.print("\t{}.u64 = __builtin_bswap64({}(", ctx.r(ctx.insn.operands[0]),
++            ctx.mmio_check_x_form() ? "REX_MM_LOAD_U64" : "REX_LOAD_U64");
++  if (ctx.insn.operands[1] != 0)
++    ctx.print("{}.u32 + ", ctx.r(ctx.insn.operands[1]));
++  ctx.println("{}.u32));", ctx.r(ctx.insn.operands[2]));
++  return true;
++}
++
+ bool build_ld(BuilderContext& ctx) {
+   ctx.emit_load_d_form("REX_LOAD_U64", "u64");
+   return true;
+diff --git a/src/codegen/instruction_dispatch.cpp b/src/codegen/instruction_dispatch.cpp
+index 40ae269..7ea93be 100644
+--- a/src/codegen/instruction_dispatch.cpp
++++ b/src/codegen/instruction_dispatch.cpp
+@@ -228,6 +228,7 @@ static const std::unordered_map<int, Builder>& GetDispatchTable() {
+       {PPC_INST_LWZUX, build_lwzux},
+       {PPC_INST_LWZX, build_lwzx},
+       {PPC_INST_LWBRX, build_lwbrx},
++      {PPC_INST_LDBRX, build_ldbrx},
+       {PPC_INST_LD, build_ld},
+       {PPC_INST_LDU, build_ldu},
+       {PPC_INST_LDX, build_ldx},
+diff --git a/src/core/cvar.cpp b/src/core/cvar.cpp
+index 228728d..4a532a9 100644
+--- a/src/core/cvar.cpp
++++ b/src/core/cvar.cpp
+@@ -600,7 +600,14 @@ std::vector<std::string> Init(int argc, char** argv) {
+   }
+ 
+   try {
+-    app.parse(argc, argv);
++    // Direct NRO loaders may provide no command line at all. CLI11's argc
++    // overload reads argv[0] and reserves argc - 1 entries, so argc == 0
++    // underflows. Its vector overload represents the empty command line.
++    if (argc > 0 && argv && argv[0]) {
++      app.parse(argc, argv);
++    } else {
++      app.parse(std::vector<std::string>{});
++    }
+   } catch (const CLI::ParseError& e) {
+     // TODO(tomc): dumb workaround for the stupid chicken and its egg.
+     //             dont call rex logging funcs here for now.
+diff --git a/src/core/filesystem_posix.cpp b/src/core/filesystem_posix.cpp
+index ba60ec8..6bb3ff7 100644
+--- a/src/core/filesystem_posix.cpp
++++ b/src/core/filesystem_posix.cpp
+@@ -74,6 +74,9 @@ namespace filesystem {
+ // headers, but they are libnx.a symbols. C linkage: the namespace does not matter.
+ extern "C" int __system_argc;
+ extern "C" char** __system_argv;
++// An NRO launched directly by an emulator may have no argv[0]. A title can
++// provide its rooted SD path without changing the generic SDK for other games.
++extern "C" const char* RexSwitchFallbackExecutablePath(void) __attribute__((weak));
+ #endif
+ 
+ std::filesystem::path GetExecutablePath() {
+@@ -123,6 +126,10 @@ std::filesystem::path GetExecutablePath() {
+     }
+     return std::filesystem::path(path);
+   }
++  if (RexSwitchFallbackExecutablePath) {
++    const char* fallback = RexSwitchFallbackExecutablePath();
++    if (fallback && fallback[0] == '/') return std::filesystem::path(fallback);
++  }
+   return {};
+ #else
+   char buff[FILENAME_MAX] = "";
+diff --git a/src/core/guest_memory_switch.cpp b/src/core/guest_memory_switch.cpp
+index 84347b6..0af7cde 100644
+--- a/src/core/guest_memory_switch.cpp
++++ b/src/core/guest_memory_switch.cpp
+@@ -7,6 +7,7 @@
+ #include <malloc.h>
+ #include <string.h>
+ #include <switch.h>
++#include <cstdio>
+ 
+ #include <map>
+ #include <set>
+@@ -119,7 +120,79 @@ State& S() {
+     return s;
+ }
+ 
+-Handle Proc() { return envGetOwnProcessHandle(); }
++// MapProcessMemory requires an actual process handle: unlike code-memory SVCs,
++// it rejects CUR_PROCESS_HANDLE. Standalone NROs can lack hbloader's handle.
++// Transfer the pseudo-handle as a copy handle through a local HIPC session, as
++// nx-hbloader does. The kernel places a real handle in this process's table.
++struct SelfProcessHandleRequest {
++    Handle server = INVALID_HANDLE;
++    Handle process = INVALID_HANDLE;
++    Result receive_result = 0;
++};
++
++void ReceiveSelfProcessHandle(void* arg) {
++    auto* request = static_cast<SelfProcessHandleRequest*>(arg);
++    hipcMakeRequestInline(armGetTls());
++    s32 index = 0;
++    request->receive_result = svcReplyAndReceive(&index, &request->server, 1,
++                                                  INVALID_HANDLE, 10000000000ULL);
++    if (R_SUCCEEDED(request->receive_result)) {
++        const HipcParsedRequest parsed = hipcParseRequest(armGetTls());
++        if (parsed.meta.num_copy_handles == 1)
++            request->process = parsed.data.copy_handles[0];
++    }
++    svcCloseHandle(request->server);
++}
++
++Handle ObtainSelfProcessHandle() {
++    SelfProcessHandleRequest request;
++    Handle client = INVALID_HANDLE;
++    Result rc = svcCreateSession(&request.server, &client, 0, 0);
++    if (R_FAILED(rc)) {
++        std::fprintf(stderr, "guest memory: self-handle session failed: %08x\n", rc);
++        return INVALID_HANDLE;
++    }
++    Thread thread;
++    rc = threadCreate(&thread, ReceiveSelfProcessHandle, &request, nullptr, 0x4000, 0x20, 0);
++    if (R_FAILED(rc)) {
++        svcCloseHandle(request.server);
++        svcCloseHandle(client);
++        std::fprintf(stderr, "guest memory: self-handle thread failed: %08x\n", rc);
++        return INVALID_HANDLE;
++    }
++    rc = threadStart(&thread);
++    if (R_FAILED(rc)) {
++        svcCloseHandle(request.server);
++        svcCloseHandle(client);
++        threadClose(&thread);
++        std::fprintf(stderr, "guest memory: self-handle thread start failed: %08x\n", rc);
++        return INVALID_HANDLE;
++    }
++    hipcMakeRequestInline(armGetTls(), .num_copy_handles = 1).copy_handles[0] = CUR_PROCESS_HANDLE;
++    // The receiver closes its endpoint after copying the handle, so a
++    // session-closed send result is expected, just as in nx-hbloader.
++    (void)svcSendSyncRequest(client);
++    svcCloseHandle(client);
++    threadWaitForExit(&thread);
++    threadClose(&thread);
++    if (request.process == INVALID_HANDLE)
++        std::fprintf(stderr, "guest memory: self-handle IPC failed: %08x\n", request.receive_result);
++    return request.process;
++}
++
++Handle Proc() {
++    static const Handle h = [] {
++        const Handle loader = envGetOwnProcessHandle();
++        return loader != INVALID_HANDLE ? loader : ObtainSelfProcessHandle();
++    }();
++    // Keep the old behaviour on failure so the original SVC error is reported.
++    return h != INVALID_HANDLE ? h : CUR_PROCESS_HANDLE;
++}
++
++bool EagerViews() {
++    static const bool eager = envGetOwnProcessHandle() == INVALID_HANDLE;
++    return eager;
++}
+ 
+ bool Intersect(size_t a, size_t al, size_t b, size_t bl, size_t* lo, size_t* hi) {
+     const size_t l = a > b ? a : b;
+@@ -457,6 +530,29 @@ bool RexGmAddView(uint8_t* base, size_t offset, size_t length) {
+      * time it is touched.
+      */
+     s.views.push_back(v);
++    if (EagerViews()) {
++        const size_t vi = s.views.size() - 1;
++        for (const auto& [off, c] : s.chunks) {
++            size_t lo, hi;
++            if (!Intersect(c.offset, c.length, v.offset, v.length, &lo, &hi)) continue;
++            if (!MapChunkIntoView(s, vi, c)) {
++                // Undo only this view; other views may already be in use.
++                for (const auto& [mapped_off, mapped_chunk] : s.chunks) {
++                    if (!s.view_mapped.count({vi, mapped_chunk.offset})) continue;
++                    size_t mapped_lo, mapped_hi;
++                    if (Intersect(mapped_chunk.offset, mapped_chunk.length, v.offset, v.length,
++                                  &mapped_lo, &mapped_hi)) {
++                        const size_t win_off = static_cast<size_t>(v.base - s.base) + (mapped_lo - v.offset);
++                        auto* src = static_cast<uint8_t*>(mapped_chunk.shadow) + (mapped_lo - mapped_chunk.offset);
++                        UnmapWindowRange(s, win_off, src, mapped_hi - mapped_lo);
++                    }
++                    s.view_mapped.erase({vi, mapped_chunk.offset});
++                }
++                s.views.pop_back();
++                return false;
++            }
++        }
++    }
+     return true;
+ }
+ 
+@@ -474,6 +570,9 @@ bool RexGmCommit(size_t offset, size_t length, RexGmAccess access) {
+     (void)access;
+     if (length == 0) return true;
+ 
++    // Creating the fallback handle starts a libnx thread, which itself takes
++    // virtmemLock to map its stack. Resolve it before acquiring that lock.
++    const Handle process = Proc();
+     State& s = S();
+     std::lock_guard<std::mutex> lock(s.mutex);
+     if (!s.base) return false;
+@@ -507,7 +606,7 @@ bool RexGmCommit(size_t offset, size_t length, RexGmAccess access) {
+ 
+         virtmemLock();
+         void* shadow = virtmemFindCodeMemory(tam, align);
+-        Result rc = shadow ? svcMapProcessCodeMemory(Proc(), reinterpret_cast<u64>(shadow),
++        Result rc = shadow ? svcMapProcessCodeMemory(process, reinterpret_cast<u64>(shadow),
+                                                      reinterpret_cast<u64>(backing), tam)
+                            : 0;
+         virtmemUnlock();
+@@ -541,6 +640,19 @@ bool RexGmCommit(size_t offset, size_t length, RexGmAccess access) {
+         const Chunk c{cur, tam, backing, shadow};
+         s.chunks[cur] = c;
+         s.committed += tam;
++        if (EagerViews()) {
++            for (size_t vi = 0; vi < s.views.size(); ++vi) {
++                size_t lo, hi;
++                if (!Intersect(c.offset, c.length, s.views[vi].offset, s.views[vi].length, &lo, &hi)) continue;
++                if (!MapChunkIntoView(s, vi, c)) {
++                    UnmapChunkFromViews(s, c);
++                    s.chunks.erase(cur);
++                    s.committed -= tam;
++                    ReleaseChunk(c);
++                    return false;
++                }
++            }
++        }
+ 
+         cur = hueco_fin;
+     }
+@@ -630,6 +742,12 @@ bool RexGmProtect(uint8_t* address, size_t length, RexGmAccess access, RexGmAcce
+ 
+     if (out_old) *out_old = AccessOf(s, begin);
+ 
++    // Ryujinx is known not to deliver guest data aborts to homebrew. Keep
++    // committed pages accessible for the same no-loader case in Eden until
++    // its exception behaviour is verified. Guest-level protection is not
++    // enforced in this mode; MMIO and write-watch need separate validation.
++    if (EagerViews()) return true;
++
+     const bool debe_estar = (access == REX_GM_WRITE);
+ 
+     /*
+diff --git a/src/input/switch/switch_input_driver.cpp b/src/input/switch/switch_input_driver.cpp
+index ccf5e2a..e0675e4 100644
+--- a/src/input/switch/switch_input_driver.cpp
++++ b/src/input/switch/switch_input_driver.cpp
+@@ -30,6 +30,9 @@
+ REXCVAR_DEFINE_BOOL(input_xbox_layout, false, "Input",
+                     "Face buttons by position, as on an Xbox pad (the bottom button, B, acts as A). "
+                     "false = by letter: A accepts and B goes back");
++REXCVAR_DEFINE_BOOL(input_service_shortcuts, true, "Input",
++                    "Enable SDK menu and GPU diagnostic controller shortcuts")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ 
+ namespace rex::ui {
+ // rex/ui/overlay/debug_overlay.h (not included here because it pulls in ImGui).
+@@ -363,6 +366,10 @@ extern "C" void RexSwitchPerfToggleAb(void);
+  * slot.menu_shortcuts with the state from the previous poll.
+  */
+ void SwitchInputDriver::DispatchMenuShortcuts(Slot& slot, uint64_t held) {
++  if (!REXCVAR_GET(input_service_shortcuts)) {
++    slot.menu_shortcuts = 0;
++    return;
++  }
+   struct Atajo {
+     uint64_t boton;
+     rex::ui::VirtualKey tecla;
+diff --git a/src/system/function_dispatcher.cpp b/src/system/function_dispatcher.cpp
+index bd43109..7ff610d 100644
+--- a/src/system/function_dispatcher.cpp
++++ b/src/system/function_dispatcher.cpp
+@@ -35,8 +35,10 @@ FunctionDispatcher* GetBoundFunctionDispatcher() {
+ }  // namespace
+ 
+ static void InvalidFunctionTrap(PPCContext& ctx, uint8_t* /*base*/) {
+-  REX_FATAL("Call to invalid or unregistered function at guest address 0x{:08X}",
+-            ctx.last_indirect_target);
++  REX_FATAL("Call to invalid or unregistered function at guest address 0x{:08X} "
++            "(LR=0x{:08X}, r1=0x{:08X}, r3=0x{:08X}, r4=0x{:08X})",
++            ctx.last_indirect_target, static_cast<uint32_t>(ctx.lr), ctx.r1.u32,
++            ctx.r3.u32, ctx.r4.u32);
+ }
+ 
+ PPCFunc* ResolveIndirectFunction(uint32_t guest_address) {
+diff --git a/src/ui/deko3d/glsl.cpp b/src/ui/deko3d/glsl.cpp
+index 62158c7..8c0c92f 100644
+--- a/src/ui/deko3d/glsl.cpp
++++ b/src/ui/deko3d/glsl.cpp
+@@ -254,14 +254,20 @@ GlslDeko SpirvAGlsl(std::span<const uint32_t> espirv, uint32_t especializacion,
+     }
+     for (const spirv_cross::Resource& b : compilador.get_shader_resources(usados).storage_buffers) {
+       const uint32_t enlace = compilador.get_decoration(b.id, spv::DecorationBinding);
++      const std::string nombre = compilador.get_name(b.id);
+       unsigned slot = 0;
+-      if (enlace >= 16 || std::sscanf(compilador.get_name(b.id).c_str(), "g_vf%u", &slot) != 1 || slot > 95) {
+-        r.error = "bufer de almacenamiento " + compilador.get_name(b.id) + " en el binding " + std::to_string(enlace) +
+-                  ": se esperaba g_vf<ranura> en 0-15";
++      // Dante-derived dsVfetch shaders select one of four buffers via a
++      // descriptor UBO; their name identifies a host binding, not a guest
++      // fetch slot. RenderDk supplies those bindings using the declaration.
++      const bool lectura_manual = r.vertices && enlace < 4 && nombre == "g_VerticesB" + std::to_string(enlace);
++      if (!lectura_manual &&
++          (enlace >= 16 || std::sscanf(nombre.c_str(), "g_vf%u", &slot) != 1 || slot > 95)) {
++        r.error = "bufer de almacenamiento " + nombre + " en el binding " + std::to_string(enlace) +
++                  ": se esperaba g_vf<ranura> o g_VerticesB0..3";
+         return r;
+       }
+       r.buffers |= 1u << enlace;
+-      r.slots_vf[enlace] = uint8_t(slot);
++      if (!lectura_manual) r.slots_vf[enlace] = uint8_t(slot);
+     }
+     for (const spirv_cross::Resource& ubo : compilador.get_shader_resources(usados).uniform_buffers) {
+       const uint32_t enlace = compilador.get_decoration(ubo.id, spv::DecorationBinding);
+diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
+index 1b86660..ffb1816 100644
+--- a/src/ui/rex_app.cpp
++++ b/src/ui/rex_app.cpp
+@@ -190,8 +190,10 @@ bool ReXApp::SetupEnvironment() {
+   rex::InitLogging(log_config);
+   rex::RegisterLogLevelCallback();
+ 
+-  log_sink_ = std::make_shared<rex::LogCaptureSink>();
+-  rex::AddSink(log_sink_);
++  if (EnableBuiltinOverlays()) {
++    log_sink_ = std::make_shared<rex::LogCaptureSink>();
++    rex::AddSink(log_sink_);
++  }
+ 
+   OnPostInitLogging();
+ 
+@@ -366,8 +368,8 @@ bool ReXApp::SetupPresentation() {
+     return false;
+   }
+ 
+-  // Set window title with SDK build stamp
+-  std::string title = std::string(GetName()) + " " + REXGLUE_BUILD_TITLE;
++  std::string title = std::string(GetName());
++  if (EnableBuiltinOverlays()) title += " " REXGLUE_BUILD_TITLE;
+   window_->SetTitle(title);
+ 
+   window_->AddListener(this);
+@@ -420,6 +422,10 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
+   // gated eager font upload in SetImmediateDrawer is skipped (font uploads
+   // lazily on the first Draw instead).
+   imgui_drawer_->SetPresenterAndImmediateDrawer(presenter, drawer);
++  if (!EnableBuiltinOverlays()) {
++    OnCreateDialogs(imgui_drawer_.get());
++    return;
++  }
+   rex::ui::RegisterBind("bind_debug_overlay", "F3", "Toggle debug overlay", [this] {
+     if (debug_overlay_) {
+       debug_overlay_.reset();
+@@ -485,7 +491,7 @@ void ReXApp::LaunchModule() {
+      * session. By creating it only when the first event arrives, the game presents every frame it
+      * renders.
+      */
+-    if (achievement_notification_listener_ == 0 && runtime_ && runtime_->kernel_state()) {
++    if (EnableBuiltinOverlays() && achievement_notification_listener_ == 0 && runtime_ && runtime_->kernel_state()) {
+       achievement_notification_listener_ = achievements().RegisterNotificationCallback(
+           [this](const rex::system::AchievementEvent& event) {
+             rex::system::AchievementEvent copia = event;
+diff --git a/src/ui/switch_crash_hooks.c b/src/ui/switch_crash_hooks.c
+index c3cc446..59f75a8 100644
+--- a/src/ui/switch_crash_hooks.c
++++ b/src/ui/switch_crash_hooks.c
+@@ -31,6 +31,7 @@
+ /* Filled in by libnx (argv.c), which does not declare them in its headers. */
+ extern int __system_argc;
+ extern char** __system_argv;
++extern const char* RexSwitchFallbackExecutablePath(void) __attribute__((weak));
+ 
+ /* Ends in '/'. Computed once at startup and never changes: the fault handler reads it without allocating memory. */
+ static char g_rex_log_dir[FS_MAX_PATH] = "sdmc:/switch/";
+@@ -40,10 +41,12 @@ const char* RexSwitchLogDir(void) {
+ }
+ 
+ static void RexSwitchInitLogDir(void) {
+-    if (__system_argc < 1 || !__system_argv || !__system_argv[0]) {
+-        return;
+-    }
+-    const char* nro = __system_argv[0];
++    const char* nro = NULL;
++    if (__system_argc > 0 && __system_argv && __system_argv[0] && __system_argv[0][0])
++        nro = __system_argv[0];
++    else if (RexSwitchFallbackExecutablePath)
++        nro = RexSwitchFallbackExecutablePath();
++    if (!nro || !nro[0]) return;
+     const char* barra = strrchr(nro, '/');
+     if (!barra) {
+         return;
+@@ -91,6 +94,7 @@ static void RexSwitchCrashHooksInit(void) {
+     snprintf(ruta, sizeof(ruta), "%srex_stderr.log", g_rex_log_dir);
+     if (freopen(ruta, "w", stderr)) {
+         setvbuf(stderr, NULL, _IONBF, 0);
++        fprintf(stderr, "ReXGlue Switch: early logging ready (argc=%d)\n", __system_argc);
+     }
+     atexit(RexSwitchExitHook);
+ }
+diff --git a/src/ui/switch_perf.cpp b/src/ui/switch_perf.cpp
+index 6b3d30a..3bb08a0 100644
+--- a/src/ui/switch_perf.cpp
++++ b/src/ui/switch_perf.cpp
+@@ -54,6 +54,8 @@
+ #include "rex/ui/switch_sysclk.h"
+ 
+ extern "C" {
++/* Applications may disable service profiling before static initialization. */
++bool RexSwitchProfilerEnabled(void) __attribute__((weak));
+ void _start(void);
+ /* rexglue log folder, ending in '/' (switch_crash_hooks.c). */
+ const char* RexSwitchLogDir(void);
+@@ -894,6 +896,7 @@ void ProfilerMain(void*) {
+ 
+ /* Priority 102: after switch_crash_hooks.c, before the SDK. */
+ __attribute__((constructor(102))) void StartProfiler() {
++  if (RexSwitchProfilerEnabled && !RexSwitchProfilerEnabled()) return;
+   g_base = reinterpret_cast<u64>(&_start);
+   MemoryInfo mi;
+   u32 page_info = 0;
+diff --git a/src/ui/window_switch.cpp b/src/ui/window_switch.cpp
+index 4612c9a..09da747 100644
+--- a/src/ui/window_switch.cpp
++++ b/src/ui/window_switch.cpp
+@@ -19,6 +19,7 @@
+ #include "rex/ui/switch_saltynx.h"
+ 
+ REXCVAR_DECLARE(bool, input_xbox_layout);  // defined in switch_input_driver.cpp
++REXCVAR_DECLARE(bool, input_service_shortcuts);
+ 
+ namespace rex::ui {
+ 
+@@ -215,6 +216,7 @@ void LeerEntradaUi(EntradaUi& salida, float toque_a_logico_x, float toque_a_logi
+ 
+   salida = EntradaUi{};
+   salida.por_posicion = REXCVAR_GET(input_xbox_layout);
++  salida.atajos_servicio = REXCVAR_GET(input_service_shortcuts);
+   padUpdate(&mando);
+   salida.mando_conectado = padIsConnected(&mando);
+   if (salida.mando_conectado) {
+diff --git a/src/x360/deko/destinos.cpp b/src/x360/deko/destinos.cpp
+index 84d8bc9..22c7e60 100644
+--- a/src/x360/deko/destinos.cpp
++++ b/src/x360/deko/destinos.cpp
+@@ -22,7 +22,9 @@
+ #include <rex/ui/deko3d/compilador.h>
+ #include <rex/ui/deko3d/presentador.h>
+ #include <rex/x360/deko/render.h>
++#include <rex/x360/deko/storage_buffer_eden.h>
+ #include <rex/x360/xenos.h>
++#include <rex/x360/deko/minininjas_full_frame.h>
+ 
+ // Settings of the renderer that the game hooks also read (nfsmw_nativo_ganchos.cpp). The Vulkan build defines them
+ // in nfsmw_nativo_dibujos.cpp, which this build leaves out: same names, types and defaults.
+@@ -37,10 +39,23 @@ REXCVAR_DEFINE_BOOL(deko_edram_baldosas, false, "deko3d",
+                     "Testing: EDRAM tile ownership (TraerBaldosas): a target copies in the tiles other targets wrote over "
+                     "it. Costly (many small copies a frame) and not shown to help Halo 3 yet")
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_BOOL(deko_minininjas_full_frame, false, "deko3d",
++                    "Mini Ninjas single-tile full-frame scene; requires a matching guest patch")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_INT32(deko_minininjas_full_frame_depth_info, 0x2D0, "deko3d",
++                     "Expected complete RB_DEPTH_INFO for the Mini Ninjas full-frame scene")
++    .range(0, 0x7FFFFFFF)
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ REXCVAR_DEFINE_INT32(deko_volcar_pasos, 0, "deko3d",
+                      "Diagnostic: how many capture frames (nfsmw_captura_cada_s) of each kind, menu (under 1000 draws) "
+                      "and game, get every resolve written shrunk to 288x160 as capturas/paso_*.ppm; 0 = off")
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_INT32(deko_altura_minima_destino, 720, "deko3d",
++                     "Minimum render-target height in sample-space pixels; titles may raise it for tall MSAA tiles")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_BOOL(deko_resolver_cuatro_franjas, false, "deko3d",
++                    "Combine only verified four-strip horizontal 4x resolve sequences")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ REXCVAR_DEFINE_BOOL(deko_exportacion_memoria, true, "deko3d",
+                     "Memory export (Halo 3's particles, light visibility tests, water): the vertex shaders' writes to "
+                     "memory reach guest memory. false = dropped, as before")
+@@ -96,6 +111,7 @@ REXCVAR_DEFINE_BOOL(nfsmw_nativo_sombra_minimo, true, "NFSMW",
+                     "texturas. Misma imagen. Necesita la biblioteca con tfetch2DSombraMin. Se comprueba sola. false = "
+                     "copiar como antes");
+ REXCVAR_DECLARE(bool, nfsmw_nativo_pcf_barato);  // nfsmw_dk_dibujos.cpp
++REXCVAR_DECLARE(bool, deko_perfil_cpu_dibujos);
+ REXCVAR_DEFINE_BOOL(nfsmw_nativo_frontal_perezoso, true, "NFSMW",
+                     "Renderizador nativo (25/09, build 184): el Swap pinta el frontal desde su destino de render en vez "
+                     "de copiarlo antes a la textura. Misma imagen; con FXAA se copia como siempre. false = copiar "
+@@ -534,7 +550,8 @@ constexpr uint32_t kBytesUboRampa = 4 * 16;  // mezcla, efectos, desplazamiento,
+ // ---- Construction
+ 
+ RenderDk::RenderDk(deko::ProveedorDeko3d& proveedor, rex::memory::Memory* memoria, rex::x360::RenderHooks& hooks)
+-    : proveedor_(proveedor), compilador_(proveedor.compilador()), memoria_(memoria), hooks_(hooks) {
++    : proveedor_(proveedor), compilador_(proveedor.compilador()), memoria_(memoria), hooks_(hooks),
++      tiempos_cpu_dibujos_(REXCVAR_GET(deko_perfil_cpu_dibujos)) {
+   deko::ConfigNucleo config;
+   config.ranuras = kRanuras;
+   config.mb_subida = uint32_t(REXCVAR_GET(nfsmw_dk_subida_mb));
+@@ -1434,7 +1451,8 @@ ImagenDk* RenderDk::ImagenColor(uint32_t base, uint32_t formato, uint32_t pitch)
+     return &it->second;
+   }
+   // The height from the pitch, as the Vulkan path (nfsmw_nativo_destinos.cpp, ObtenerDestino explains why).
+-  const uint32_t alto = std::min(kAltoMaximoDestino, std::max<uint32_t>(720, (pitch + 15) & ~15u));
++  const uint32_t minimo = uint32_t(std::clamp(REXCVAR_GET(deko_altura_minima_destino), 720, int32_t(kAltoMaximoDestino)));
++  const uint32_t alto = std::min(kAltoMaximoDestino, std::max(minimo, (pitch + 15) & ~15u));
+   ImagenDk imagen;
+   uint32_t flags = DkImageFlags_UsageRender | DkImageFlags_Usage2DEngine;
+   if (REXCVAR_GET(nfsmw_dk_compresion_color)) {
+@@ -1532,7 +1550,8 @@ ImagenDk* RenderDk::DestinoProfundidad(uint32_t base, uint32_t formato, uint32_t
+   if (auto it = profundidades_.find(clave); it != profundidades_.end()) {
+     return &it->second;
+   }
+-  const uint32_t alto = std::min(kAltoMaximoDestino, std::max<uint32_t>(720, (pitch + 15) & ~15u));
++  const uint32_t minimo = uint32_t(std::clamp(REXCVAR_GET(deko_altura_minima_destino), 720, int32_t(kAltoMaximoDestino)));
++  const uint32_t alto = std::min(kAltoMaximoDestino, std::max(minimo, (pitch + 15) & ~15u));
+   ImagenDk imagen;
+   // Both guest depth formats (24-bit fixed and float) as D24S8, as the Vulkan path does on the console. No
+   // compression: untested on deko3d, and copies broke it on nouveau (HowToDeko3d.md, section 5.10).
+@@ -1685,6 +1704,17 @@ const ImagenDk* RenderDk::TexturaResuelta(uint32_t direccion, uint32_t ancho, ui
+ 
+ // ---- Copies (resolve and clear)
+ 
++namespace {
++bool VirtualFullFrameCopy(const RegistrosCopia& reg) {
++  static const bool enabled = REXCVAR_GET(deko_minininjas_full_frame);
++  static const bool tile_ownership = REXCVAR_GET(deko_edram_baldosas);
++  static const uint32_t expected_depth = uint32_t(REXCVAR_GET(deko_minininjas_full_frame_depth_info));
++  return minininjas_full_frame::Matches(enabled, tile_ownership, reg.rb_surface_info,
++                                       reg.rb_color_info[0], reg.rb_depth_info, expected_depth);
++}
++
++}  // namespace
++
+ bool RenderDk::Rechazar(uint32_t causa, const char* texto) {
+   ++rechazados_;
+   ++causas_[causa];
+@@ -1769,6 +1799,26 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
+   const bool copiar =
+       comando == uint32_t(xenos::CopyCommand::kRaw) || comando == uint32_t(xenos::CopyCommand::kConvert);
+   const uint32_t pitch = reg.rb_surface_info & 0x3FFF;
++  if (REXCVAR_GET(deko_resolver_cuatro_franjas)) {
++    if (origen >= xenos::kMaxColorRenderTargets && copiar) {
++      // Depth resolves between color strips are normal; only an overlapping
++      // guest destination invalidates the pending color sequence.
++      const uint64_t w = ((uint64_t(reg.rb_copy_dest_pitch & 0x3FFF) + 31) / 32) * 32;
++      const uint64_t h = ((uint64_t((reg.rb_copy_dest_pitch >> 16) & 0x3FFF) + 31) / 32) * 32;
++      franjas_horizontales_.InvalidateOverlapping(reg.rb_copy_dest_base & 0x1FFFFFFF, w * h * 4);
++    } else if (origen < xenos::kMaxColorRenderTargets && copiar) {
++      // Different depth and color sequences are independent unless the guest
++      // destinations could alias. The full envelope is conservative.
++      const uint64_t w = ((uint64_t(reg.rb_copy_dest_pitch & 0x3FFF) + 31) / 32) * 32;
++      const uint64_t h = ((uint64_t((reg.rb_copy_dest_pitch >> 16) & 0x3FFF) + 31) / 32) * 32;
++      franjas_profundidad_.InvalidateOverlapping(reg.rb_copy_dest_base & 0x1FFFFFFF, w * h * 4);
++    } else if (origen < xenos::kMaxColorRenderTargets && !copiar) {
++      franjas_horizontales_.Reset();
++      franjas_profundidad_.Reset();
++    } else if (origen >= xenos::kMaxColorRenderTargets && !copiar) {
++      franjas_profundidad_.Reset();
++    }
++  }
+   if (origen >= xenos::kMaxColorRenderTargets && volcando_captura_) {
+     volcado_dibujos_.push_back(fmt::format("  c copia de profundidad {:03X} pitch {} -> {:08X} | copiar {} borrar z {} valor {:08X}",
+                                            reg.rb_depth_info & 0xFFF, pitch, reg.rb_copy_dest_base, comando,
+@@ -1797,12 +1847,22 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
+     }
+   }
+   if (!DestinoComoRgba8(formato_color)) {
++    franjas_horizontales_.Reset();
+     return Rechazar(100 + formato_color, "formato de destino de render todavia no soportado");
+   }
+   int32_t x0, y0, x1, y1;
+   if (!Rectangulo(reg, pitch, x0, y0, x1, y1)) {
++    franjas_horizontales_.Reset();
+     return false;
+   }
++  if (VirtualFullFrameCopy(reg)) {
++    static bool logged = false;
++    if (!logged) {
++      logged = true;
++      REXLOG_INFO("[deko3d] Mini full-frame first color resolve rect={},{}..{},{} dest={:08X} pitch_height={:08X}",
++                  x0, y0, x1, y1, reg.rb_copy_dest_base, reg.rb_copy_dest_pitch);
++    }
++  }
+   // A 4x MSAA surface's pixels are 2x2 samples of the image at twice the pitch (Dibujar): the rectangle is in pixels.
+   const uint32_t muestras = ((reg.rb_surface_info >> 16) & 0x3) == 2 ? 2 : 1;
+   ImagenDk* destino_render = DestinoColor(info_color & 0xFFF, formato_color, pitch * muestras, true);
+@@ -1821,8 +1881,10 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
+     uint32_t dx = 0, dy = 0;
+     uint32_t base_resuelta = 0;
+     if ((info_destino >> 3) & 0x1) {
++      franjas_horizontales_.Reset();
+       Rechazar(3, "copia a textura 3D o array: todavia no");
+     } else if (!CopiaComoRgba8(formato_destino)) {
++      franjas_horizontales_.Reset();
+       Rechazar(300 + formato_destino, "formato de copia todavia no soportado");
+     } else {
+       const uint32_t pitch_destino = reg.rb_copy_dest_pitch & 0x3FFF;
+@@ -1843,8 +1905,34 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
+       const uint32_t ancho_resolve = uint32_t(x1 - x0);
+       const uint32_t ancho_textura =
+           x0 == 0 && ancho_resolve < pitch_destino && ancho_resolve + 32 > pitch_destino ? ancho_resolve : pitch_destino;
++      if (REXCVAR_GET(deko_resolver_cuatro_franjas) && VirtualFullFrameCopy(reg)) {
++        minininjas_full_frame::InvalidateCopy(franjas_horizontales_, base_resuelta, pitch_destino, alto_destino);
++      } else if (REXCVAR_GET(deko_resolver_cuatro_franjas)) {
++        const resolve::HorizontalStrip franja{fotograma_, reg.rb_surface_info, info_color, info_destino, control,
++          pitch, pitch_destino, alto_destino, base_resuelta, uint32_t(x0), uint32_t(y0), uint32_t(x1), uint32_t(y1),
++          reg.pa_sc_window_offset, reg.pa_su_sc_mode_cntl};
++        const auto combinado = franjas_horizontales_.Observe(franja);
++        if (combinado.started) {
++          const auto it = resueltas_.find(combinado.base);
++          franjas_horizontales_.SetPreviousVersion(combinado.base, it == resueltas_.end() ? 0 : it->second.imagen.version);
++        }
++        if (combinado.merged) {
++          auto it = resueltas_.find(combinado.base);
++          if (it != resueltas_.end() && it->second.escrita && it->second.imagen.version > combinado.previous_version &&
++              !it->second.imagen.profundidad &&
++              it->second.formato_guest == formato_destino && it->second.imagen.ancho == ancho_textura &&
++              it->second.imagen.alto == alto_destino &&
++              it->second.imagen.intercambio_rb == bool((info_destino >> 24) & 1)) {
++            resuelta = &it->second;
++            base_resuelta = combinado.base;
++            dx += combinado.dx;
++          } else {
++            franjas_horizontales_.InvalidateOwner(combinado.base);
++          }
++        }
++      }
+       uint32_t filas_banda = 0;
+-      if ((resuelta = BandaDe(base_resuelta, ancho_textura, alto_destino, pitch_destino, false, filas_banda))) {
++      if (!resuelta && (resuelta = BandaDe(base_resuelta, ancho_textura, alto_destino, pitch_destino, false, filas_banda))) {
+         dy += filas_banda;  // base_resuelta is now the texture's own
+       }
+       if (!resuelta) {
+@@ -2195,19 +2283,30 @@ void RenderDk::RestaurarContenido(ImagenDk& destino, bool para_resolver) {
+ void RenderDk::CopiarProfundidad(const RegistrosCopia& reg, uint32_t pitch, bool borrara) {
+   const uint32_t info_destino = reg.rb_copy_dest_info;
+   if ((info_destino >> 3) & 0x1) {
++    franjas_profundidad_.Reset();
+     Rechazar(3, "copia a textura 3D o array: todavia no");
+     return;
+   }
+   int32_t x0, y0, x1, y1;
+   if (!Rectangulo(reg, pitch, x0, y0, x1, y1)) {
++    franjas_profundidad_.Reset();
+     return;
+   }
++  if (VirtualFullFrameCopy(reg)) {
++    static bool logged = false;
++    if (!logged) {
++      logged = true;
++      REXLOG_INFO("[deko3d] Mini full-frame first depth resolve rect={},{}..{},{} dest={:08X} pitch_height={:08X}",
++                  x0, y0, x1, y1, reg.rb_copy_dest_base, reg.rb_copy_dest_pitch);
++    }
++  }
+   const uint32_t info = reg.rb_depth_info;
+   ++copias_profundidad_;
+   // A 4x MSAA depth buffer is the image at twice the pitch (sample space, Dibujar); the rectangle is in pixels.
+   const uint32_t muestras = ((reg.rb_surface_info >> 16) & 0x3) == 2 ? 2 : 1;
+   ImagenDk* profundidad = DestinoProfundidad(info & 0xFFF, (info >> 16) & 0x1, pitch * muestras);
+   if (!profundidad) {
++    franjas_profundidad_.Reset();
+     return;
+   }
+   const uint32_t pitch_destino = reg.rb_copy_dest_pitch & 0x3FFF;
+@@ -2217,31 +2316,61 @@ void RenderDk::CopiarProfundidad(const RegistrosCopia& reg, uint32_t pitch, bool
+   const uint32_t base =
+       (reg.rb_copy_dest_base + uint32_t(DesplazamientoMosaico2D(int32_t(base_x), int32_t(base_y), pitch_destino, 2))) &
+       0x1FFFFFFF;
+-  const uint32_t dx = uint32_t(x0) - base_x;
++  uint32_t dx = uint32_t(x0) - base_x;
+   uint32_t dy = uint32_t(y0) - base_y;
+   const uint32_t formato_textura = ((info >> 16) & 0x1) ? 23 : 22;  // k_24_8_FLOAT : k_24_8
+   // Its width as for color (the pitch is padded to 32 texels; see Copiar).
+   const uint32_t ancho_resolve = uint32_t(x1 - x0);
+   const uint32_t ancho_textura =
+       x0 == 0 && ancho_resolve < pitch_destino && ancho_resolve + 32 > pitch_destino ? ancho_resolve : pitch_destino;
+-  uint32_t base_textura = base, filas_banda = 0;
+-  Resuelta* resuelta = BandaDe(base_textura, ancho_textura, alto_destino, pitch_destino, true, filas_banda);
+-  if (resuelta) {
+-    dy += filas_banda;
+-  } else {
+-    resuelta = ObtenerResuelta(base, ancho_textura, alto_destino, formato_textura, false, true);
++  Resuelta* resuelta = nullptr;
++  if (REXCVAR_GET(deko_resolver_cuatro_franjas) && VirtualFullFrameCopy(reg)) {
++    minininjas_full_frame::InvalidateCopy(franjas_profundidad_, base, pitch_destino, alto_destino);
++  } else if (REXCVAR_GET(deko_resolver_cuatro_franjas)) {
++    const resolve::HorizontalStrip franja{fotograma_, reg.rb_surface_info, info, info_destino, reg.rb_copy_control,
++      pitch, pitch_destino, alto_destino, base, uint32_t(x0), uint32_t(y0), uint32_t(x1), uint32_t(y1),
++      reg.pa_sc_window_offset, reg.pa_su_sc_mode_cntl};
++    const auto combinado = franjas_profundidad_.Observe(franja);
++    if (combinado.started) {
++      const auto it = resueltas_.find(combinado.base);
++      franjas_profundidad_.SetPreviousVersion(combinado.base, it == resueltas_.end() ? 0 : it->second.imagen.version);
++    }
++    if (combinado.merged) {
++      auto it = resueltas_.find(combinado.base);
++      if (it != resueltas_.end() && it->second.escrita && it->second.imagen.version > combinado.previous_version &&
++          it->second.imagen.profundidad && it->second.formato_guest == formato_textura &&
++          it->second.imagen.ancho == ancho_textura && it->second.imagen.alto == alto_destino &&
++          !it->second.imagen.intercambio_rb) {
++        resuelta = &it->second;
++        dx += combinado.dx;
++      } else {
++        franjas_profundidad_.InvalidateOwner(combinado.base);
++      }
++    }
+   }
+   if (!resuelta) {
++    uint32_t base_textura = base, filas_banda = 0;
++    resuelta = BandaDe(base_textura, ancho_textura, alto_destino, pitch_destino, true, filas_banda);
++    if (resuelta) {
++      dy += filas_banda;
++    } else {
++      resuelta = ObtenerResuelta(base, ancho_textura, alto_destino, formato_textura, false, true);
++    }
++  }
++  if (!resuelta) {
++    franjas_profundidad_.Reset();
+     return;
+   }
+   const uint32_t ancho_px = profundidad->ancho / muestras, alto_px = profundidad->alto / muestras;
+   if (uint32_t(x0) >= ancho_px || uint32_t(y0) >= alto_px || dx >= resuelta->imagen.ancho ||
+       dy >= resuelta->imagen.alto) {
++    franjas_profundidad_.Reset();
+     return;
+   }
+   const uint32_t ancho = std::min({uint32_t(x1 - x0), ancho_px - uint32_t(x0), resuelta->imagen.ancho - dx});
+   const uint32_t alto = std::min({uint32_t(y1 - y0), alto_px - uint32_t(y0), resuelta->imagen.alto - dy});
+   if (!ancho || !alto) {
++    franjas_profundidad_.Reset();
+     return;
+   }
+   AsegurarTrabajo();
+@@ -2275,6 +2404,7 @@ void RenderDk::CopiarProfundidad(const RegistrosCopia& reg, uint32_t pitch, bool
+   if (!Copiar3D(*profundidad, uint32_t(x0), uint32_t(y0), ancho, alto, resuelta->imagen, dx, dy, kCopiaValor, 1.0f,
+                 muestras)) {
+     if (muestras > 1) {
++      franjas_profundidad_.Reset();
+       return;  // the copy engine moves texels one to one
+     }
+     MarcarGpu(kGpuCopias);
+@@ -3361,9 +3491,9 @@ void RenderDk::ReservarExportacion(const uint32_t* r, uint32_t vertices, uint32_
+   }
+   er.regiones.push_back(region);
+   ++export_dibujos_;
+-  dkCmdBufBindStorageBuffer(nucleo_.comandos(), DkStage_Vertex, 15,
+-                            export_gpu_ + uint64_t(trabajo_ % kRanuras) * kDwordsExportRanura * 4,
+-                            kDwordsExportRanura * 4);
++  deko::BindStorageBuffer(nucleo_.comandos(), DkStage_Vertex, 15,
++                          export_gpu_ + uint64_t(trabajo_ % kRanuras) * kDwordsExportRanura * 4,
++                          kDwordsExportRanura * 4);
+ }
+ 
+ void RenderDk::SincronizarExportaciones(uint32_t inicio, uint32_t fin) {
+@@ -3564,7 +3694,7 @@ void RenderDk::InformePeriodico() {
+   X360_INFORME(
+       "[deko3d] ultimos {:.0f} s: {:.1f} fotogramas/s, {:.0f} dibujos por fotograma ({} rechazados en total); GPU "
+       "{:.2f} ms por fotograma ({} trabajos medidos); por fotograma: {:.1f} copias, {:.1f} borrados, {:.1f} barreras de transferencia, {:.2f} MB de subida (vertices, "
+-      "indices, constantes, texturas); grabar un dibujo {:.2f} us en RenderDk (sin esperas a la GPU); texturas: {} vivas ({} MB), {} creadas "
++      "indices, constantes, texturas); {}; texturas: {} vivas ({} MB), {} creadas "
+       "y {} subidas ({} MB) en el intervalo; lecturas de vuelta al invitado {}; {} trabajos, {} cambios de ranura por "
+       "subida llena en total, comandos max {} KB; imagenes {} MB en {} trozos; shaders: {} de la cache, {} compilados "
+       "en el acto, {} en segundo plano (en total)",
+@@ -3574,7 +3704,11 @@ void RenderDk::InformePeriodico() {
+       double(borrados_ + borrados_profundidad_ - informe_borrados_) / fotogramas,
+       double(barreras_ - informe_barreras_) / fotogramas,
+       n.trabajos ? double(n.bytes_subida) / fotogramas / 1048576.0 : 0.0,
+-      dibujos ? double(ns_grabando_ - informe_ns_grabando_) / double(dibujos) / 1000.0 : 0.0, texturas_.size(),
++      tiempos_cpu_dibujos_
++          ? fmt::format("grabar un dibujo {:.2f} us en RenderDk (sin esperas a la GPU)",
++                        dibujos ? double(ns_grabando_ - informe_ns_grabando_) / double(dibujos) / 1000.0 : 0.0)
++          : std::string("CPU draw timings disabled"),
++      texturas_.size(),
+       bytes_texturas_ >> 20, texturas_creadas_ - informe_creadas_, texturas_subidas_ - informe_subidas_,
+       (bytes_subidos_ - informe_bytes_subidos_) >> 20, lecturas_escritas_ - informe_lecturas_, n.trabajos,
+       cambios_ranura_, n.bytes_comandos_max >> 10, n.bytes_imagenes >> 20, n.trozos_imagenes, aciertos_cache_,
+@@ -3638,22 +3772,26 @@ void RenderDk::InformePeriodico() {
+   X360_INFORME(
+       "[deko3d] por fotograma: {:.2f} intercambios en vez de copias, {:.2f} restauraciones, {:.2f} cubos con caras "
+       "resueltas, {:.2f} cielos aplazados (guardia {}), {:.2f} MB de vertices sin copiar (repetidos en el trabajo); "
+-      "sombra por minimo: fase {}, {} ciclos ({} limpios seguidos, {} aplicados), {} diferencias; por dibujo en el "
+-      "anillo: preparar {:.2f} us, texturas {:.2f}, estado {:.2f}, vertices {:.2f}, indices {:.2f}, constantes y dibujo "
+-      "{:.2f}",
++      "sombra por minimo: fase {}, {} ciclos ({} limpios seguidos, {} aplicados), {} diferencias; {}",
+       double(intercambios_ - informe_intercambios_) / fotogramas,
+       double(restauraciones_ - informe_restauraciones_) / fotogramas,
+       double(cubos_refrescados_ - informe_cubos_) / fotogramas, double(cielo_aplazados_ - informe_cielos_) / fotogramas,
+       cielo_guardia_ == kCieloAplazando ? "superada" : cielo_guardia_ == kCieloDescartado ? "descartada" : "mirando",
+       double(dedupe_.bytes_ahorrados() - informe_dedupe_bytes_) / 1048576.0 / fotogramas, kFasesSm[sm_fase_ % 3],
+-      sm_ciclos_, sm_limpios_seguidos_, sm_ciclos_aplicados_, sm_diferencias_, us(0), us(1), us(2), us(3), us(4), us(5));
+-  {
++      sm_ciclos_, sm_limpios_seguidos_, sm_ciclos_aplicados_, sm_diferencias_,
++      tiempos_cpu_dibujos_
++          ? fmt::format("por dibujo en el anillo: preparar {:.2f} us, texturas {:.2f}, estado {:.2f}, vertices {:.2f}, "
++                        "indices {:.2f}, constantes y dibujo {:.2f}", us(0), us(1), us(2), us(3), us(4), us(5))
++          : std::string("CPU draw stage timings disabled"));
++  if (tiempos_cpu_dibujos_) {
+     const auto sub = [&](uint32_t e) {
+       return dibujos ? double(ns_sub_estado_[e] - informe_sub_estado_[e]) / double(dibujos) / 1e3 : 0.0;
+     };
+     X360_INFORME("[deko3d] estado por dibujo: destinos {:.2f} us, buferes {:.2f}, encuadre y bandas {:.2f}, "
+                  "constantes compartidas {:.2f}, shaders {:.2f}, estado fijo {:.2f}",
+                  sub(0), sub(1), sub(2), sub(3), sub(4), sub(5));
++  } else {
++    X360_INFORME("[deko3d] CPU draw state timings disabled");
+   }
+   X360_INFORME(
+       "[deko3d] por fotograma: {:.1f} copias en el motor 3D, {:.1f} barreras de fragmentos, {:.2f} frontales pintados "
+diff --git a/src/x360/deko/dibujos.cpp b/src/x360/deko/dibujos.cpp
+index bef958b..4a1b46a 100644
+--- a/src/x360/deko/dibujos.cpp
++++ b/src/x360/deko/dibujos.cpp
+@@ -31,6 +31,10 @@
+ #include <rex/ui/deko3d/compilador.h>
+ #include <rex/ui/deko3d/glsl.h>
+ #include <rex/x360/deko/render.h>
++#include <rex/x360/deko/msaa_select.h>
++#include <rex/x360/deko/minininjas_full_frame.h>
++#include <rex/x360/deko/storage_buffer_eden.h>
++#include <rex/x360/deko/vfetch_inheritance.h>
+ #include <rex/x360/shader_entry.h>
+ #include <rex/x360/xenos.h>
+ 
+@@ -101,7 +105,17 @@ REXCVAR_DECLARE(bool, nfsmw_dk_perfil_barrera);
+ REXCVAR_DECLARE(bool, nfsmw_dk_perfil_variantes);
+ REXCVAR_DECLARE(bool, nfsmw_nativo_ps_solo_alfa);
+ REXCVAR_DECLARE(bool, deko_msaa_real);
++REXCVAR_DECLARE(bool, deko_edram_baldosas);
++REXCVAR_DECLARE(bool, deko_minininjas_full_frame);
++REXCVAR_DECLARE(int32_t, deko_minininjas_full_frame_depth_info);
++REXCVAR_DEFINE_INT32(deko_msaa_minimo_pitch_muestras, 1600, "deko3d",
++                     "Minimum sample-space render-target pitch for native 4x MSAA passes")
++    .range(2, 65535)
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ // deko3d only.
++REXCVAR_DEFINE_BOOL(deko_perfil_cpu_dibujos, true, "deko3d",
++                    "Collect per-draw CPU recording and stage timings for diagnostics")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ REXCVAR_DEFINE_BOOL(deko_diagnostico_magenta, false, "deko3d",
+                     "Testing: every pixel shader writes opaque magenta to all its outputs, to see where the geometry "
+                     "lands whatever the shading does")
+@@ -556,11 +570,55 @@ bool RenderDk::CalcularEntrada(const PeticionDibujo& p, EntradaVerticesDk& entra
+     if (q == SIZE_MAX) {
+       return Rechazar(21, "fetch de vertices no encontrado en el VS parcheado");
+     }
+-    const uint32_t d0 = parcheado[q], d1 = parcheado[q + 1], d2 = parcheado[q + 2];
+-    const uint32_t ranura = ((d0 >> 20) & 0x1F) * 3 + ((d0 >> 25) & 0x3);
++    const uint32_t d1 = parcheado[q + 1], d2 = parcheado[q + 2];
++    const uint32_t* previo_completo = nullptr;
++    if (d1 & (uint32_t{1} << 30)) {
++      // Instruction order follows the shader's declared fetches. Mini fetches inherit
++      // address operands from the previous full fetch, not their own placeholder bits.
++      size_t anterior = SIZE_MAX;
++      for (const ElementoVertice& otro : vs.elementos) {
++        const size_t i = size_t(otro.instruccion) * 3;
++        if (i >= q || i + 2 >= parcheado.size() || (parcheado[i] & 0x1F) != 0 ||
++            (parcheado[i + 1] & (uint32_t{1} << 30))) continue;
++        if (anterior == SIZE_MAX || i > anterior) anterior = i;
++      }
++      if (anterior != SIZE_MAX) previo_completo = &parcheado[anterior];
++    }
++    vfetch::FetchAddress direccion;
++    if (!vfetch::ResolveFetchAddress(&parcheado[q], previo_completo, direccion))
++      return Rechazar(27, "mini fetch sin fetch completo anterior");
++    // The translated shader uses the original fetch index; a patched mini must
++    // inherit that same index and rounding mode. Other shader libraries may not
++    // record this information, so they fail closed instead of assuming r0.x.
++    if ((d1 & (uint32_t{1} << 30)) &&
++        !vfetch::MiniFetchIndexMatches(direccion, elemento.indice_valido, elemento.indice_registro,
++                                      elemento.indice_componente, elemento.redondeado))
++      return Rechazar(28, "mini fetch con indice heredado distinto o desconocido");
++    const uint32_t ranura = direccion.slot;
+     const uint32_t formato = (d1 >> 16) & 0x3F;
+-    const uint32_t zancada = (d2 & 0xFF) * 4;
++    const uint32_t zancada = direccion.stride;
+     const int32_t offset = (int32_t(d2 << 1) >> 9) * 4;
++    if (elemento.manual) {
++      if (offset < 0) return Rechazar(24, "offset de lectura manual negativo");
++      const uint32_t k = uint32_t(&elemento - vs.elementos.data());
++      if (k >= 16) return Rechazar(26, "descriptor de lectura manual fuera de UBO3");
++      auto it = std::find(entrada.ranuras_manuales.begin(), entrada.ranuras_manuales.end(), ranura);
++      if (it == entrada.ranuras_manuales.end()) {
++        if (entrada.ranuras_manuales.size() >= 4) return Rechazar(26, "mas de 4 buffers de lectura manual");
++        entrada.ranuras_manuales.push_back(ranura);
++      }
++      EntradaVerticesDk::Manual m;
++      m.k = k;
++      m.ranura = ranura;
++      m.formato = formato;
++      m.offset = uint32_t(offset);
++      m.zancada = zancada;
++      m.remapeo = CodigoRemapeo(original, d1 & 0xFFF);
++      m.con_signo = (d1 >> 12) & 1;
++      m.entero = (d1 >> 13) & 1;
++      entrada.manuales.push_back(m);
++      continue;
++    }
+     int32_t ubicacion = -1;
+     if (vs.ubicaciones_por_orden) {
+       // The translator's rule (HALO3_RECOMP): the position of this (usage, index) among the distinct ones, in
+@@ -588,7 +646,8 @@ bool RenderDk::CalcularEntrada(const PeticionDibujo& p, EntradaVerticesDk& entra
+     DkVtxAttribSize tamano;
+     DkVtxAttribType tipo;
+     bool r11g11b10 = false;
+-    if (!AtributoDe(formato, EntradaEntera(elemento.uso), (d1 >> 12) & 0x1, (d1 >> 13) & 0x1, tamano, tipo,
++    const bool entrada_entera = EntradaEntera(elemento.uso) && !vs.blendindices_float;
++    if (!AtributoDe(formato, entrada_entera, (d1 >> 12) & 0x1, (d1 >> 13) & 0x1, tamano, tipo,
+                     r11g11b10)) {
+       return Rechazar(300 + formato, "formato de vertice todavia no soportado");
+     }
+@@ -717,7 +776,7 @@ uint32_t RenderDk::CalcularEncuadre(const uint32_t* r, uint32_t vte, bool sin_re
+ 
+ // ---- Render targets of a draw. Nothing to close or open: binding others is all a pass change costs.
+ 
+-bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
++bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch, bool virtual_full_frame) {
+   TerminarPase();  // the deferred sky belongs to the pass that ends here
+   std::array<ImagenDk*, 5> imagenes{};
+   for (uint32_t i = 0; i < 4; ++i) {
+@@ -751,11 +810,10 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
+   std::array<ImagenDk*, 5> ms{};
+   bool pase_ms = false;
+   if (msaa_real && fs_ms_validos_) {
+-    // Only the large ones (Halo 3's menu G-buffer, 2320 samples wide): where shading every sample cost the most. The
+-    // small 4x passes of the game (effects, 280-600 pixels) stay in sample space.
+-    for (uint32_t i = 0; i < 5; ++i) {
+-      pase_ms |= claves[i] && ((claves[i] >> 20) & 0x3) == 2 && (claves[i] & 0xFFFF) >= 1600;
+-    }
++    // Preserve the existing default selection; an app may lower the sample-space
++    // pitch threshold for a separately verified 4x pass.
++    static const uint32_t minimo_pitch = uint32_t(REXCVAR_GET(deko_msaa_minimo_pitch_muestras));
++    pase_ms = rex::x360::msaa::SelectNative4x(claves, minimo_pitch);
+     for (uint32_t i = 0; i < 5 && pase_ms; ++i) {
+       if (imagenes[i] && !(ms[i] = CompaneraMs(*imagenes[i]))) {
+         pase_ms = false;
+@@ -765,7 +823,7 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
+       // The rows a 4x pass can reach: what fits in the EDRAM before the next bound target's base (as Dibujar clips
+       // its draws), in sample rows (16 per tile row).
+       uint32_t limite = UINT32_MAX;
+-      for (uint32_t i = 0; i < 5; ++i) {
++      for (uint32_t i = 0; i < 5 && !virtual_full_frame; ++i) {
+         if (!claves[i]) {
+           continue;
+         }
+@@ -903,6 +961,7 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
+   pase_coches_sombra_ = imagenes[4] && PaseDeCochesSombra(imagenes[4], solo_profundidad);
+   std::copy(claves, claves + 5, g_.pase);
+   g_.pase_valido = true;
++  g_.pase_virtual_full_frame = virtual_full_frame;
+   g_.pase_ancho = ancho;
+   g_.pase_alto = alto;
+   ++serie_imagenes_;  // a new pass: the framing cache keys on it
+@@ -1278,11 +1337,33 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+   if (!r || !p.vs || (p.vs->spirv.empty() && p.vs->glsl.empty())) {
+     return false;
+   }
+-  const uint64_t inicio_ns = deko::AhoraNs();
+-  const uint64_t espera_inicio_ns = nucleo_.NsEsperandoValla();  // waits for the GPU are not recording time
++  static const bool full_frame_enabled = REXCVAR_GET(deko_minininjas_full_frame);
++  bool virtual_full_frame = false;
++  if (full_frame_enabled) {
++    static const bool edram_tile_ownership = REXCVAR_GET(deko_edram_baldosas);
++    static const uint32_t expected_full_depth = uint32_t(REXCVAR_GET(deko_minininjas_full_frame_depth_info));
++    const uint32_t full_surface = r[gr::XE_GPU_REG_RB_SURFACE_INFO];
++    const uint32_t full_color0 = r[gr::XE_GPU_REG_RB_COLOR_INFO];
++    const uint32_t full_depth = r[gr::XE_GPU_REG_RB_DEPTH_INFO];
++    virtual_full_frame = rex::x360::minininjas_full_frame::Matches(
++        true, edram_tile_ownership, full_surface, full_color0, full_depth, expected_full_depth);
++    if (rex::x360::minininjas_full_frame::IsFullWidth4x(full_surface)) {
++      static bool logged_match = false, logged_mismatch = false;
++      bool& logged = virtual_full_frame ? logged_match : logged_mismatch;
++      if (!logged) {
++        logged = true;
++        REXLOG_INFO("[deko3d] Mini full-frame {} surface={:08X} color0={:08X} depth={:08X} expected={:08X} edram_tiles={}",
++                    virtual_full_frame ? "matched" : "not matched", full_surface, full_color0, full_depth,
++                    expected_full_depth, edram_tile_ownership);
++      }
++    }
++  }
++  const uint64_t inicio_ns = tiempos_cpu_dibujos_ ? deko::AhoraNs() : 0;
++  const uint64_t espera_inicio_ns = tiempos_cpu_dibujos_ ? nucleo_.NsEsperandoValla() : 0;
+   // Stage times (ns_etapas_), without the waits for the GPU that may happen inside a stage.
+   uint64_t marca_etapa = inicio_ns, espera_etapa = espera_inicio_ns;
+   auto cortar_etapa = [&](uint32_t etapa) {
++    if (!tiempos_cpu_dibujos_) return;
+     const uint64_t ahora = deko::AhoraNs(), espera = nucleo_.NsEsperandoValla();
+     ns_etapas_[etapa] += (ahora - marca_etapa) - (espera - espera_etapa);
+     marca_etapa = ahora;
+@@ -1771,8 +1852,9 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+ 
+   cortar_etapa(1);
+   // Diagnostic: the state stage split in six (ns_sub_estado_), waits for the GPU included.
+-  uint64_t marca_sub = deko::AhoraNs();
++  uint64_t marca_sub = tiempos_cpu_dibujos_ ? deko::AhoraNs() : 0;
+   auto cortar_sub = [&](uint32_t i) {
++    if (!tiempos_cpu_dibujos_) return;
+     const uint64_t ahora = deko::AhoraNs();
+     ns_sub_estado_[i] += ahora - marca_sub;
+     marca_sub = ahora;
+@@ -1794,13 +1876,17 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+   };
+   std::array<BuferVf, 32> buferes_vf;
+   uint32_t n_buferes_vf = 0, bytes_buferes_vf = 0;
+-  bool bloque_halo = false;
++  bool bloque_halo_vs = false, bloque_halo_ps = false;
+   for (const EntradaShader* e : {p.vs, ps}) {
+     if (!e) {
+       continue;
+     }
+     const InfoShader& info = InfoDe(*e);
+-    bloque_halo |= (info.ubos >> 3) & 0x1;
++    // dsVfetch uses the same UBO/storage binding numbers as Halo's ABI, but
++    // their contents differ. Handle this vertex shader in its dedicated path.
++    if (e == p.vs && !entrada->manuales.empty()) continue;
++    if (e->vertices) bloque_halo_vs |= (info.ubos >> 3) & 0x1;
++    else bloque_halo_ps |= (info.ubos >> 3) & 0x1;
+     for (uint32_t b = 0; b < 16; ++b) {
+       if (!((info.buffers >> b) & 0x1)) {
+         continue;
+@@ -1833,9 +1919,25 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+       bytes_buferes_vf += ((std::max(bytes, 16u) + 255) & ~255u) + DK_UNIFORM_BUF_ALIGNMENT;
+     }
+   }
++  std::array<Origen, 4> origenes_manuales{};
++  uint32_t bytes_manuales = entrada->manuales.empty() ? 0 : 256 + DK_UNIFORM_BUF_ALIGNMENT;
++  for (size_t b = 0; b < entrada->ranuras_manuales.size(); ++b) {
++    const uint32_t slot = entrada->ranuras_manuales[b];
++    const uint32_t d0 = r[kRegFetch + slot * 2], d1 = r[kRegFetch + slot * 2 + 1];
++    const uint32_t direccion = d0 & 0x1FFFFFFC;
++    const uint32_t bytes = ((d1 >> 2) & 0xFFFFFF) * 4;
++    if ((d0 & 0x3) != uint32_t(xenos::FetchConstantType::kVertex) || !bytes || bytes > (8u << 20) ||
++        uint64_t(direccion) + bytes > kMemoriaFisica) {
++      return Rechazar(27, "bufer de lectura manual invalido o demasiado grande");
++    }
++    if (export_bloque_) SincronizarExportaciones(direccion, direccion + bytes);
++    origenes_manuales[b] = {memoria_->TranslatePhysical(direccion), static_cast<xenos::Endian>(d1 & 0x3), bytes};
++    bytes_manuales += ((bytes + 15) & ~15u) + DK_UNIFORM_BUF_ALIGNMENT;
++  }
+   const uint32_t necesarios = bytes_vertices + bytes_indices + 16 + 3 * DK_UNIFORM_BUF_ALIGNMENT +
+                               std::max(bytes_vs, kUboBytesVs) + std::max(bytes_ps, kUboBytesPs) + kUboBytesCompartidas +
+-                              bytes_buferes_vf + (bloque_halo ? 2 * DK_UNIFORM_BUF_ALIGNMENT : 0);
++                              bytes_buferes_vf + bytes_manuales +
++                              ((bloque_halo_vs || bloque_halo_ps) ? 2 * DK_UNIFORM_BUF_ALIGNMENT : 0);
+   const uint32_t rebanada = nucleo_.config().mb_subida << 20;
+   if (necesarios > rebanada) {
+     return Rechazar(13, "dibujo mayor que el anillo de subida");
+@@ -1845,8 +1947,9 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+   }
+ 
+   // --- Render targets
+-  if (!solo_exportar && (!g_.pase_valido || std::memcmp(g_.pase, claves, sizeof(claves)) != 0)) {
+-    if (!EmpezarPase(claves, pitch)) {
++  if (!solo_exportar && (!g_.pase_valido || g_.pase_virtual_full_frame != virtual_full_frame ||
++                         std::memcmp(g_.pase, claves, sizeof(claves)) != 0)) {
++    if (!EmpezarPase(claves, pitch, virtual_full_frame)) {
+       return false;
+     }
+   }
+@@ -1870,7 +1973,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+           });
+       if (en_almacen.gpu) {
+         geometria_.Usar(en_almacen.entrada, trabajo_);
+-        dkCmdBufBindStorageBuffer(cmd, v.etapa, v.enlace, en_almacen.gpu - v.inicio, tam + v.inicio);
++        deko::BindStorageBuffer(cmd, v.etapa, v.enlace, en_almacen.gpu - v.inicio, tam + v.inicio);
+         continue;
+       }
+     }
+@@ -1882,17 +1985,42 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+       CopiarVertices(TrabajoCopia{v.datos, s.cpu, v.bytes / 4, v.orden});  // byte-swapped as vertex data
+     }
+     std::memset(s.cpu + v.bytes, 0, tam - v.bytes);  // only the padding: the ring is CPU-uncached
+-    dkCmdBufBindStorageBuffer(cmd, v.etapa, v.enlace, s.gpu - v.inicio, tam + v.inicio);
++    deko::BindStorageBuffer(cmd, v.etapa, v.enlace, s.gpu - v.inicio, tam + v.inicio);
+   }
+-  if (bloque_halo) {
++  if (bloque_halo_vs || bloque_halo_ps) {
+     // 256 booleans (8 words at 0x4900) then the 32 loop constants (0x4908): halo3_shader_common.h's block.
+     const deko::Subida s = nucleo_.Reservar(DK_UNIFORM_BUF_ALIGNMENT, DK_UNIFORM_BUF_ALIGNMENT);
+     if (!s) {
+       return Rechazar(13, "sin sitio en el anillo de subida");
+     }
+     std::memcpy(s.cpu, r + kRegBooleanos, 40 * sizeof(uint32_t));
+-    dkCmdBufBindUniformBuffer(cmd, DkStage_Vertex, 3, s.gpu, DK_UNIFORM_BUF_ALIGNMENT);
+-    dkCmdBufBindUniformBuffer(cmd, DkStage_Fragment, 3, s.gpu, DK_UNIFORM_BUF_ALIGNMENT);
++    if (bloque_halo_vs) dkCmdBufBindUniformBuffer(cmd, DkStage_Vertex, 3, s.gpu, DK_UNIFORM_BUF_ALIGNMENT);
++    if (bloque_halo_ps) dkCmdBufBindUniformBuffer(cmd, DkStage_Fragment, 3, s.gpu, DK_UNIFORM_BUF_ALIGNMENT);
++  }
++  if (!entrada->manuales.empty()) {
++    for (size_t b = 0; b < entrada->ranuras_manuales.size(); ++b) {
++      const Origen& origen = origenes_manuales[b];
++      const uint32_t tam = (origen.bytes + 15) & ~15u;
++      const deko::Subida s = nucleo_.Reservar(tam, DK_UNIFORM_BUF_ALIGNMENT);
++      if (!s) return Rechazar(13, "sin sitio para lectura manual");
++      CopiarVertices(TrabajoCopia{origen.datos, s.cpu, origen.bytes / 4, origen.orden});
++      if (tam > origen.bytes) std::memset(s.cpu + origen.bytes, 0, tam - origen.bytes);
++      deko::BindStorageBuffer(cmd, DkStage_Vertex, uint32_t(b), s.gpu, tam);
++    }
++    const deko::Subida s = nucleo_.Reservar(256, DK_UNIFORM_BUF_ALIGNMENT);
++    if (!s) return Rechazar(13, "sin sitio para descriptores de lectura manual");
++    std::array<uint32_t, 64> descriptores{};
++    for (const EntradaVerticesDk::Manual& m : entrada->manuales) {
++      const auto it = std::find(entrada->ranuras_manuales.begin(), entrada->ranuras_manuales.end(), m.ranura);
++      if (it == entrada->ranuras_manuales.end()) return Rechazar(27, "slot de lectura manual no encontrado");
++      const uint32_t b = uint32_t(it - entrada->ranuras_manuales.begin());
++      descriptores[m.k * 4] = b | (m.formato << 8) | (uint32_t(m.con_signo) << 16) | (uint32_t(m.entero) << 17);
++      descriptores[m.k * 4 + 1] = m.offset;
++      descriptores[m.k * 4 + 2] = m.zancada;
++      descriptores[m.k * 4 + 3] = m.remapeo;
++    }
++    std::memcpy(s.cpu, descriptores.data(), sizeof(descriptores));
++    dkCmdBufBindUniformBuffer(cmd, DkStage_Vertex, 3, s.gpu, 256);
+   }
+   cortar_sub(1);
+ 
+@@ -1920,7 +2048,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+   // samples in all): the console draws nothing below them. Halo 3's 4x menu tiles keep 160 of the pass's rows;
+   // drawn whole, each tile shaded the full screen and marked the other targets' tiles as its own. Not for the
+   // shadow targets, larger here than on the console.
+-  if (!vacio && !destino_sombras) {
++  if (!vacio && !destino_sombras && !virtual_full_frame) {
+     const uint32_t info = r[gr::XE_GPU_REG_RB_SURFACE_INFO];
+     const uint32_t muestras_4x = ((info >> 16) & 0x3) == 2 ? 2 : 1;
+     const uint32_t filas_por_franja = ((info >> 16) & 0x3) ? 8 : 16;
+@@ -2057,7 +2185,12 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+   compartidas[64] = (r[kRegBooleanos] & 0xFFFF) | ((r[kRegBooleanos + 4] & 0xFFFF) << 16);
+   compartidas[65] = 0;  // g_SwappedTexcoords
+   if (!(r[gr::XE_GPU_REG_PA_SU_VTX_CNTL] & 0x1)) {  // PixelCenter::kD3DZero
+-    const float medio[2] = {1.0f / viewport[2], -1.0f / std::abs(viewport[3])};
++    // The D3D9 half-pixel offset is in guest pixels. The viewport has already
++    // been scaled for sample-space rendering, so scale this offset as well.
++    // Otherwise a clear ending at guest x = width - 0.5 misses the last sample
++    // column at 2x, leaving stale depth along every resolved strip boundary.
++    const float medio[2] = {pase_escala_ / viewport[2],
++                            -pase_escala_ / std::abs(viewport[3])};
+     std::memcpy(&compartidas[66], medio, sizeof(medio));
+   }
+   std::memcpy(&compartidas[68], &umbral_alfa, sizeof(umbral_alfa));
+@@ -2319,6 +2452,9 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+     }
+   }
+   if (!g_.valido || entrada != g_.entrada) {
++    // A forgotten state or a changed layout may follow an internal draw (for
++    // example the deferred sky) that rebound buffers outside this path.
++    g_.buffer_bindings.Reset();
+     dkCmdBufBindVtxAttribState(cmd, entrada->atributos.data(), entrada->n_atributos);
+     dkCmdBufBindVtxBufferState(cmd, entrada->estado_bufers.data(), uint32_t(entrada->enlaces.size()));
+     g_.entrada = entrada;
+@@ -2369,7 +2505,9 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+   // overwrites them and the GPU reads that command's header as data (the console's GPU method error of 2026-10-09,
+   // HowToDeko3d.md, section 6, item 17). With one buffer, the 5 reserved words leave room for the sixth.
+   for (size_t b = 0; b < entrada->enlaces.size(); ++b) {
+-    dkCmdBufBindVtxBuffers(cmd, uint32_t(b), &bufers[b], 1);
++    if (g_.buffer_bindings.SetVertex(uint32_t(b), uint64_t(bufers[b].addr), bufers[b].size)) {
++      dkCmdBufBindVtxBuffers(cmd, uint32_t(b), &bufers[b], 1);
++    }
+   }
+   cortar_etapa(3);
+   DkGpuAddr dir_indices = 0;
+@@ -2392,7 +2530,10 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+       }
+       dir_indices = s.gpu;
+     }
+-    dkCmdBufBindIdxBuffer(cmd, indices_de_16 ? DkIdxFormat_Uint16 : DkIdxFormat_Uint32, dir_indices);
++    const DkIdxFormat formato_indices = indices_de_16 ? DkIdxFormat_Uint16 : DkIdxFormat_Uint32;
++    if (g_.buffer_bindings.SetIndex(uint64_t(dir_indices), uint32_t(formato_indices))) {
++      dkCmdBufBindIdxBuffer(cmd, formato_indices, dir_indices);
++    }
+   }
+   cortar_etapa(4);
+   static const bool por_diferencias = REXCVAR_GET(nfsmw_dk_constantes_por_diferencias);
+@@ -2730,7 +2871,9 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+   }
+   ++dibujados_;
+   cortar_etapa(5);
+-  ns_grabando_ += deko::AhoraNs() - inicio_ns - (nucleo_.NsEsperandoValla() - espera_inicio_ns);
++  if (tiempos_cpu_dibujos_) {
++    ns_grabando_ += deko::AhoraNs() - inicio_ns - (nucleo_.NsEsperandoValla() - espera_inicio_ns);
++  }
+   return true;
+ }
+ 
+diff --git a/src/x360/deko/geometria.cpp b/src/x360/deko/geometria.cpp
+index 7046556..05b5c99 100644
+--- a/src/x360/deko/geometria.cpp
++++ b/src/x360/deko/geometria.cpp
+@@ -5,8 +5,13 @@
+ // XXH3 inlined here (the same algorithm and values as the library's): the store hashes ranges in 64-byte lines, and
+ // an out-of-line XXH3_64bits call per line was the ring thread's largest single cost in a race (run of 2026-10-22:
+ // ~13 % of its samples under HuellaFase). With the length a constant 64 the compiler emits the fixed 17-128 byte path.
++// Guest buffers may be written through different types. Use xxHash's memcpy reads so strict aliasing cannot move a
++// load across a guest write (the same protection used for the shader and texture caches).
++#undef XXH_FORCE_MEMORY_ACCESS
++#define XXH_FORCE_MEMORY_ACCESS 0
+ #define XXH_INLINE_ALL
+ #include <xxhash.h>
++#include "geometry_fingerprint.h"
+ 
+ #include <algorithm>
+ 
+@@ -54,28 +59,8 @@ uint64_t HuellaLinea(const uint8_t* datos, uint32_t bytes, uint32_t i) {
+ }  // namespace
+ 
+ uint64_t AlmacenGeometria::Huellas(const uint8_t* datos, uint32_t bytes, uint64_t* fases) {
+-  const uint32_t lineas = (bytes + kLinea - 1) / kLinea;
+-  if (lineas <= kFases) {
+-    return XXH3_64bits(datos, bytes);  // too small for a sample to save anything
+-  }
+-  uint64_t completa = 0x243F6A8885A308D3ull;
+-  for (uint32_t p = 0; p < kFases; ++p) {
+-    fases[p] = 0x13198A2E03707344ull + p;
+-  }
+-  uint64_t primera = 0, ultima = 0;
+-  for (uint32_t i = 0; i < lineas; ++i) {
+-    const uint64_t h = HuellaLinea(datos, bytes, i);
+-    completa = Plegar(completa, h);
+-    fases[i % kFases] = Plegar(fases[i % kFases], h);
+-    if (i == 0) {
+-      primera = h;
+-    }
+-    ultima = h;
+-  }
+-  for (uint32_t p = 0; p < kFases; ++p) {
+-    fases[p] = Plegar(Plegar(fases[p], primera), ultima);
+-  }
+-  return completa;
++  static_assert(kFases == geometry_fingerprint::kPhases && kLinea == geometry_fingerprint::kLine);
++  return geometry_fingerprint::Calculate(datos, bytes, fases);
+ }
+ 
+ uint64_t AlmacenGeometria::HuellaFase(const uint8_t* datos, uint32_t bytes, uint32_t fase, uint64_t& leidos) {
+@@ -92,6 +77,7 @@ uint64_t AlmacenGeometria::HuellaFase(const uint8_t* datos, uint32_t bytes, uint
+ void AlmacenGeometria::Crear(Nucleo& nucleo, uint32_t mb, bool muestreo) {
+   nucleo_ = &nucleo;
+   muestreo_ = muestreo;
++  huella_completa_directa_ = !muestreo;
+   if (!mb) {
+     return;
+   }
+@@ -116,6 +102,7 @@ void AlmacenGeometria::Destruir() {
+   libres_.clear();
+   pendientes_.clear();
+   bytes_usados_ = 0;
++  huella_completa_directa_ = false;
+ }
+ 
+ bool AlmacenGeometria::Terminado(uint64_t trabajo) {
+@@ -251,16 +238,18 @@ AlmacenGeometria::Resultado AlmacenGeometria::Consultar(const uint8_t* datos, ui
+     // The sample changed (or disagreed): the whole path below decides.
+   }
+   uint64_t fases[kFases];
+-  const uint64_t huella = Huellas(datos, bytes, fases);
++  const bool con_fases = muestreo_ && (bytes + kLinea - 1) / kLinea > kFases;
++  const uint64_t huella = huella_completa_directa_ ? XXH3_64bits(datos, bytes)
++                                                   : Huellas(datos, bytes, con_fases ? fases : nullptr);
+   estadisticas_.bytes_huella += bytes;
+-  const bool con_fases = (bytes + kLinea - 1) / kLinea > kFases;
+   if (nueva) {
+     e.huella = huella;  // first sighting: the ring this time
+     e.fases_validas = con_fases;
+-    std::copy(fases, fases + kFases, e.fases);
++    if (con_fases) std::copy(fases, fases + kFases, e.fases);
+     return {};
+   }
+   if (huella == e.huella) {
++    if (!con_fases) e.fases_validas = false;
+     if (con_fases && !e.fases_validas) {
+       e.fases_validas = true;
+       std::copy(fases, fases + kFases, e.fases);
+@@ -284,7 +273,7 @@ AlmacenGeometria::Resultado AlmacenGeometria::Consultar(const uint8_t* datos, ui
+   ++estadisticas_.cambios;
+   e.huella = huella;
+   e.fases_validas = con_fases;
+-  std::copy(fases, fases + kFases, e.fases);
++  if (con_fases) std::copy(fases, fases + kFases, e.fases);
+   SoltarBloque(e);
+   if (++e.cambios >= 2) {
+     e.volatil_hasta = fotograma_ + kFotogramasVolatil;
+@@ -359,21 +348,22 @@ void AlmacenGeometria::SoltarBloque(Entrada& e) {
+ 
+ void AlmacenGeometria::Desalojar(uint32_t necesarios) {
+   // The blocks not used in this frame or the last, oldest first, until an eighth of the store (or what is needed)
+-  // is free again: one sort for many admissions.
++  // is free again. Heapify once, then order only the candidates actually evicted;
++  // a full sort also orders the usually much larger set we keep.
+   std::vector<std::pair<uint64_t, Entrada*>> candidatas;
+   for (auto& [clave, e] : tabla_) {
+     if (e.tam && e.fotograma + 2 <= fotograma_) {
+       candidatas.emplace_back(e.fotograma, &e);
+     }
+   }
+-  std::sort(candidatas.begin(), candidatas.end(),
+-            [](const auto& a, const auto& b) { return a.first < b.first; });
++  const auto mas_reciente = [](const auto& a, const auto& b) { return a.first > b.first; };
++  std::make_heap(candidatas.begin(), candidatas.end(), mas_reciente);
+   const uint64_t objetivo = std::max<uint64_t>(necesarios, bytes_total_ / 8);
+   uint64_t liberados = 0;
+-  for (const auto& [fotograma, e] : candidatas) {
+-    if (liberados >= objetivo) {
+-      break;
+-    }
++  while (!candidatas.empty() && liberados < objetivo) {
++    std::pop_heap(candidatas.begin(), candidatas.end(), mas_reciente);
++    Entrada* e = candidatas.back().second;
++    candidatas.pop_back();
+     liberados += e->tam;
+     ++estadisticas_.desalojos;
+     SoltarBloque(*e);

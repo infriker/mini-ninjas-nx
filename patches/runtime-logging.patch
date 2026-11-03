@@ -1,0 +1,299 @@
+diff --git a/src/x360/deko/destinos.cpp b/src/x360/deko/destinos.cpp
+index 22c7e60..d972778 100644
+--- a/src/x360/deko/destinos.cpp
++++ b/src/x360/deko/destinos.cpp
+@@ -1855,14 +1855,6 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
+     franjas_horizontales_.Reset();
+     return false;
+   }
+-  if (VirtualFullFrameCopy(reg)) {
+-    static bool logged = false;
+-    if (!logged) {
+-      logged = true;
+-      REXLOG_INFO("[deko3d] Mini full-frame first color resolve rect={},{}..{},{} dest={:08X} pitch_height={:08X}",
+-                  x0, y0, x1, y1, reg.rb_copy_dest_base, reg.rb_copy_dest_pitch);
+-    }
+-  }
+   // A 4x MSAA surface's pixels are 2x2 samples of the image at twice the pitch (Dibujar): the rectangle is in pixels.
+   const uint32_t muestras = ((reg.rb_surface_info >> 16) & 0x3) == 2 ? 2 : 1;
+   ImagenDk* destino_render = DestinoColor(info_color & 0xFFF, formato_color, pitch * muestras, true);
+@@ -2292,14 +2284,6 @@ void RenderDk::CopiarProfundidad(const RegistrosCopia& reg, uint32_t pitch, bool
+     franjas_profundidad_.Reset();
+     return;
+   }
+-  if (VirtualFullFrameCopy(reg)) {
+-    static bool logged = false;
+-    if (!logged) {
+-      logged = true;
+-      REXLOG_INFO("[deko3d] Mini full-frame first depth resolve rect={},{}..{},{} dest={:08X} pitch_height={:08X}",
+-                  x0, y0, x1, y1, reg.rb_copy_dest_base, reg.rb_copy_dest_pitch);
+-    }
+-  }
+   const uint32_t info = reg.rb_depth_info;
+   ++copias_profundidad_;
+   // A 4x MSAA depth buffer is the image at twice the pitch (sample space, Dibujar); the rectangle is in pixels.
+@@ -3118,38 +3102,6 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
+   }
+   const uint32_t ancho_origen = desde_destino ? frontal_.ancho : (origen ? origen->ancho : 0);
+   const uint32_t alto_origen = desde_destino ? frontal_.alto : (origen ? origen->alto : 0);
+-  // DIAG (picture / "2 frames"): to stderr so it survives a crash in rex_stderr.log. Logs the swap's
+-  // frontbuffer, the chosen source, and every resolved texture, so we can see which of the two is the
+-  // real scene vs the empty/white one. First swaps only. No behavior change.
+-  {
+-    static int diag_pres = 0;
+-    // The first swaps, then one in 300 (in game the front buffer may not be the menu's).
+-    if (diag_pres < 48 || (fotograma_ % 300) == 0) {
+-      ++diag_pres;
+-      std::fprintf(stderr,
+-                   "[present] fotograma %llu swap base=%08X formato %u %ux%u want=%ux%u desde_destino=%d origen=%s %ux%u "
+-                   "| resueltas=%zu:",
+-                   (unsigned long long)fotograma_, base, swap.dword[1] & 0x3F, (swap.dword[2] & 0x1FFF) + 1,
+-                   ((swap.dword[2] >> 13) & 0x1FFF) + 1, ancho, alto, int(desde_destino),
+-                   origen ? (desde_destino ? "frontal" : "resuelta") : "NINGUNA", ancho_origen, alto_origen,
+-                   resueltas_.size());
+-      for (const auto& par : resueltas_) {
+-        std::fprintf(stderr, " [%08X %ux%u v%llu %c%s]", par.first, par.second.imagen.ancho,
+-                     par.second.imagen.alto, (unsigned long long)par.second.imagen.version,
+-                     par.second.escrita ? 'W' : '.', (origen == &par.second.imagen) ? "<=" : "");
+-      }
+-      std::fprintf(stderr,
+-                   " ultimo_frontal=%08X rechazados=%llu copias3d=%llu llevados=%llu bandas=%llu baldosas=%llu "
+-                   "borrados_rapidos=%llu causas:",
+-                   ultimo_frontal_, (unsigned long long)rechazados_, (unsigned long long)copias_3d_,
+-                   (unsigned long long)contenidos_llevados_, (unsigned long long)bandas_resueltas_,
+-                   (unsigned long long)baldosas_traidas_, (unsigned long long)borrados_rapidos_);
+-      for (const auto& c : causas_) {
+-        std::fprintf(stderr, " c%u=%llu", c.first, (unsigned long long)c.second);
+-      }
+-      std::fprintf(stderr, "\n");
+-    }
+-  }
+   if (!origen) {
+     Rechazar(14, "Swap sin textura resuelta");
+   } else if (presentador) {
+@@ -3220,7 +3172,6 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
+   CerrarFotogramaDeLaGuardiaDelCielo();
+   SoltarTexturasSiHaceFalta();
+   GuardarCacheSiHaceFalta(false);
+-  InformePeriodico();
+   return pintado;
+ }
+ 
+diff --git a/src/x360/deko/dibujos.cpp b/src/x360/deko/dibujos.cpp
+index 4a1b46a..6ee1d86 100644
+--- a/src/x360/deko/dibujos.cpp
++++ b/src/x360/deko/dibujos.cpp
+@@ -1347,16 +1347,6 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+     const uint32_t full_depth = r[gr::XE_GPU_REG_RB_DEPTH_INFO];
+     virtual_full_frame = rex::x360::minininjas_full_frame::Matches(
+         true, edram_tile_ownership, full_surface, full_color0, full_depth, expected_full_depth);
+-    if (rex::x360::minininjas_full_frame::IsFullWidth4x(full_surface)) {
+-      static bool logged_match = false, logged_mismatch = false;
+-      bool& logged = virtual_full_frame ? logged_match : logged_mismatch;
+-      if (!logged) {
+-        logged = true;
+-        REXLOG_INFO("[deko3d] Mini full-frame {} surface={:08X} color0={:08X} depth={:08X} expected={:08X} edram_tiles={}",
+-                    virtual_full_frame ? "matched" : "not matched", full_surface, full_color0, full_depth,
+-                    expected_full_depth, edram_tile_ownership);
+-      }
+-    }
+   }
+   const uint64_t inicio_ns = tiempos_cpu_dibujos_ ? deko::AhoraNs() : 0;
+   const uint64_t espera_inicio_ns = tiempos_cpu_dibujos_ ? nucleo_.NsEsperandoValla() : 0;
+diff --git a/src/core/logging.cpp b/src/core/logging.cpp
+index 2097fed..81fc340 100644
+--- a/src/core/logging.cpp
++++ b/src/core/logging.cpp
+@@ -460,7 +460,12 @@ void SetCategoryLevel(LogCategoryId category, spdlog::level::level_enum level) {
+ }
+ 
+ void SetAllLevels(spdlog::level::level_enum level) {
++  std::lock_guard lock(g_mutex);
++  // Apply to future categories too, and supersede per-category configuration.
++  g_config.default_level = level;
++  g_config.category_levels.clear();
+   for (auto& entry : g_registry) {
++    entry.has_explicit_level = false;
+     if (entry.logger)
+       entry.logger->set_level(level);
+   }
+diff --git a/src/audio/audio_system.cpp b/src/audio/audio_system.cpp
+index 303601f..78561b6 100644
+--- a/src/audio/audio_system.cpp
++++ b/src/audio/audio_system.cpp
+@@ -52,30 +52,6 @@ REXCVAR_DEFINE_BOOL(audio_diag_prioridad_critica, false, "Audio",
+ 
+ namespace rex::audio {
+ 
+-namespace {
+-// How long the game's audio callback takes, to stderr every 10 s: the console asks for a frame every 5.33 ms, so a
+-// callback that takes longer (waiting on the game, for one) is a frame that arrives late or not at all.
+-void MedirLlamada(std::chrono::steady_clock::duration d) {
+-  using namespace std::chrono;
+-  static uint64_t llamadas = 0, total_us = 0, maximo_us = 0, largas = 0;
+-  static steady_clock::time_point inicio = steady_clock::now();
+-  const uint64_t us = uint64_t(duration_cast<microseconds>(d).count());
+-  ++llamadas;
+-  total_us += us;
+-  maximo_us = std::max(maximo_us, us);
+-  largas += us > 5333 ? 1 : 0;
+-  const auto ahora = steady_clock::now();
+-  if (ahora - inicio >= seconds(10)) {
+-    std::fprintf(stderr, "[audio] 10 s: %llu llamadas al juego, media %llu us, maxima %.1f ms, %llu de mas de 5,3 ms\n",
+-                 (unsigned long long)llamadas, (unsigned long long)(llamadas ? total_us / llamadas : 0),
+-                 double(maximo_us) / 1000.0, (unsigned long long)largas);
+-    llamadas = total_us = maximo_us = largas = 0;
+-    inicio = ahora;
+-  }
+-}
+-}  // namespace
+-
+-
+ namespace {
+ constexpr std::chrono::milliseconds kWorkerShutdownTimeout{500};
+ std::atomic<GanchoAntesDeTrama> g_gancho_antes_de_trama{nullptr};
+@@ -196,10 +172,8 @@ void AudioSystem::WorkerThreadMain() {
+         }
+         SCOPE_profile_cpu_i("apu", "rex::audio::AudioSystem->client_callback");
+         uint64_t args[] = {client_callback_arg};
+-        const auto antes = std::chrono::steady_clock::now();
+         function_dispatcher_->Execute(worker_thread_->thread_state(), client_callback, args,
+                                       rex::countof(args));
+-        MedirLlamada(std::chrono::steady_clock::now() - antes);
+         if (diag_pump_count < 10) {
+           REXAPU_DEBUG("AudioWorker: callback returned for client {}", index);
+         }
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_io.cpp b/src/kernel/xboxkrnl/xboxkrnl_io.cpp
+index a583ff0..61da1a3 100644
+--- a/src/kernel/xboxkrnl/xboxkrnl_io.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_io.cpp
+@@ -532,14 +532,17 @@ u32 NtCreateFile_entry(mapped_u32 handle_out, u32 desired_access,
+   // Attempt open (or create).
+   rex::filesystem::File* vfs_file;
+   rex::filesystem::FileAction file_action;
+-  const uint64_t io_inicio_us = AhoraUs();
++  const bool medir_io = REXCVAR_GET(nfsmw_io_resumen_s) > 0 || REXCVAR_GET(nfsmw_io_aviso_ms) > 0;
++  const uint64_t io_inicio_us = medir_io ? AhoraUs() : 0;
+   X_STATUS result = REX_KERNEL_FS()->OpenFile(
+       root_entry, target_path, rex::filesystem::FileDisposition((uint32_t)creation_disposition),
+       desired_access, (create_options & CreateOptions::FILE_DIRECTORY_FILE) != 0,
+       (create_options & CreateOptions::FILE_NON_DIRECTORY_FILE) != 0, &vfs_file, &file_action);
+-  const uint64_t io_fin_us = AhoraUs();
+-  AnotarApertura(io_fin_us - io_inicio_us, XSUCCEEDED(result), target_path);
+-  QuizaResumenIo(io_fin_us);
++  if (medir_io) {
++    const uint64_t io_fin_us = AhoraUs();
++    AnotarApertura(io_fin_us - io_inicio_us, XSUCCEEDED(result), target_path);
++    QuizaResumenIo(io_fin_us);
++  }
+   object_ref<XFile> file = nullptr;
+ 
+   X_HANDLE handle = X_INVALID_HANDLE_VALUE;
+@@ -645,16 +648,18 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
+     if (true || file->is_synchronous()) {
+       // Synchronous.
+       uint32_t bytes_read = 0;
+-      // Where the read starts. If no offset is given, the game reads from the file position.
+-      const uint64_t desplazamiento =
+-          byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : file->position();
+-      const uint64_t io_inicio_us = AhoraUs();
++      const bool medir_io = REXCVAR_GET(nfsmw_io_resumen_s) > 0 || REXCVAR_GET(nfsmw_io_aviso_ms) > 0;
++      const uint64_t desplazamiento = medir_io ?
++          (byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : file->position()) : 0;
++      const uint64_t io_inicio_us = medir_io ? AhoraUs() : 0;
+       result = file->Read(buffer.guest_address(), buffer_length,
+                           byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : -1,
+                           &bytes_read, apc_context.guest_address());
+-      const uint64_t io_fin_us = AhoraUs();
+-      AnotarLectura(io_fin_us - io_inicio_us, bytes_read, file->path(), desplazamiento);
+-      QuizaResumenIo(io_fin_us);
++      if (medir_io) {
++        const uint64_t io_fin_us = AhoraUs();
++        AnotarLectura(io_fin_us - io_inicio_us, bytes_read, file->path(), desplazamiento);
++        QuizaResumenIo(io_fin_us);
++      }
+       if (io_status_block) {
+         io_status_block->status = result;
+         io_status_block->information = bytes_read;
+@@ -755,22 +760,17 @@ u32 NtReadFileScatter_entry(u32 file_handle, u32 event_handle, mapped_void apc_r
+     if (true || file->is_synchronous()) {
+       // Synchronous.
+       uint32_t bytes_read = 0;
+-      const uint64_t desplazamiento =
+-          byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : file->position();
+-      const uint64_t io_inicio_us = AhoraUs();
++      const bool medir_io = REXCVAR_GET(nfsmw_io_resumen_s) > 0 || REXCVAR_GET(nfsmw_io_aviso_ms) > 0;
++      const uint64_t desplazamiento = medir_io ?
++          (byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : file->position()) : 0;
++      const uint64_t io_inicio_us = medir_io ? AhoraUs() : 0;
+       result = file->ReadScatter(segment_array.guest_address(), length,
+                                  byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : -1,
+                                  &bytes_read, apc_context.guest_address());
+-      const uint64_t io_fin_us = AhoraUs();
+-      // In the [io] summaries with the plain reads, and named once on stderr: whether a game streams this way at all.
+-      AnotarLectura(io_fin_us - io_inicio_us, bytes_read, file->path(), desplazamiento);
+-      QuizaResumenIo(io_fin_us);
+-      static std::atomic<uint32_t> avisadas{0};
+-      if (avisadas.fetch_add(1, std::memory_order_relaxed) < 4) {
+-        std::fprintf(stderr, "[io] lectura dispersa (NtReadFileScatter): %s, %u bytes en %llu, %s, apc %s\n",
+-                     std::string(file->path()).c_str(), uint32_t(length), (unsigned long long)desplazamiento,
+-                     file->is_synchronous() ? "sincrona" : "asincrona",
+-                     ((uint32_t)apc_routine_ptr & ~1u) ? "si" : "no");
++      if (medir_io) {
++        const uint64_t io_fin_us = AhoraUs();
++        AnotarLectura(io_fin_us - io_inicio_us, bytes_read, file->path(), desplazamiento);
++        QuizaResumenIo(io_fin_us);
+       }
+       if (io_status_block) {
+         io_status_block->status = result;
+diff --git a/src/x360/deko/destinos.cpp b/src/x360/deko/destinos.cpp
+index 6827e5d..a68d087 100644
+--- a/src/x360/deko/destinos.cpp
++++ b/src/x360/deko/destinos.cpp
+@@ -2721,33 +2721,11 @@ void RenderDk::EscribirLecturas(uint32_t ranura) {
+           if (intercambio) {
+             std::swap(h[0], h[2]);
+           }
+-          // Halo 3's exposure: the 1-row float resolves its CPU reads back. Its first texel now and then.
+-          if (p.alto_destino == 1 && i == 0 && fotograma_ >= siguiente_aviso_exposicion_) {
+-            siguiente_aviso_exposicion_ = fotograma_ + 300;
+-            std::fprintf(stderr, "[exposicion] f%llu %08X %ux%u: %g %g %g %g\n",
+-                         static_cast<unsigned long long>(fotograma_), p.base, p.ancho, p.alto, MedioAFlotante(h[0]),
+-                         MedioAFlotante(h[1]), MedioAFlotante(h[2]), MedioAFlotante(h[3]));
+-            escribir_vista_exposicion_ = uint32_t(direccion);  // compared through the CPU's views once written
+-          }
+           const uint32_t w[2] = {xenos::GpuSwap(uint32_t(h[0]) | (uint32_t(h[1]) << 16), orden),
+                                  xenos::GpuSwap(uint32_t(h[2]) | (uint32_t(h[3]) << 16), orden)};
+           std::memcpy(fisica + direccion, w, 8);
+         }
+       }
+-      // Diagnostic: the CPU reads physical memory through the 0xA/0xC/0xE views; if they do not alias the physical
+-      // base the GPU writes, the game never sees what the GPU wrote (its exposure loop runs to an extreme).
+-      if (escribir_vista_exposicion_) {
+-        const uint32_t d = escribir_vista_exposicion_;
+-        escribir_vista_exposicion_ = 0;
+-        const uint8_t* vistas[4] = {memoria_->TranslatePhysical(d), memoria_->TranslateVirtual(0xA0000000u | d),
+-                                    memoria_->TranslateVirtual(0xC0000000u | d),
+-                                    memoria_->TranslateVirtual(0xE0000000u | d)};
+-        uint64_t v[4];
+-        for (int k = 0; k < 4; ++k) std::memcpy(&v[k], vistas[k], 8);
+-        std::fprintf(stderr, "[vistas] %08X fisica %016llX A %016llX C %016llX E %016llX: %s\n", d,
+-                     (unsigned long long)v[0], (unsigned long long)v[1], (unsigned long long)v[2],
+-                     (unsigned long long)v[3], (v[0] == v[1] && v[0] == v[2] && v[0] == v[3]) ? "iguales" : "DISTINTAS");
+-      }
+       ++lecturas_escritas_;
+       continue;
+     }
+diff --git a/src/system/xevent.cpp b/src/system/xevent.cpp
+index e5e74d7..35e9529 100644
+--- a/src/system/xevent.cpp
++++ b/src/system/xevent.cpp
+@@ -56,8 +56,6 @@ void ComprobarProductorDeAudio(const XObject* evento) {
+     return;
+   }
+   hilo->thread()->set_priority(0x3A);
+-  std::fprintf(stderr, "[audio] el hilo %u alimenta el callback de audio: sube a la prioridad 0x3A\n",
+-               hilo->thread_id());
+ #endif
+ }
+ }  // namespace

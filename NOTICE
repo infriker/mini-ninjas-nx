@@ -1,0 +1,32 @@
+Mini Ninjas NX - third-party notices
+
+The application and build tools include adaptations of dantes-inferno-nx and
+its predecessors ds2-nx, nfsmw-nx and gears2-nx, distributed under GPL-3.0 or
+later; see LICENSE and LICENSES/dante-third-party-notices.txt. Generated-code
+helper optimizations are described in tools/perf/NOTICE. The optional stack
+optimization from those ports is not used.
+
+The Switch runtime uses nx-mod/rexglue-sdk-nx and ReXGlue, including Xenia
+contributions, under the BSD-3-Clause terms in LICENSES/rexglue-sdk.txt.
+The XenosRecomp translator-derived code is under the MIT terms in
+LICENSES/xenosrecomp-mit.txt. The pinned SDK source and source patches in this
+repository contain the applicable copyright notices.
+
+The SDK uses FFmpeg and libmspack (LGPL-2.1), fmt, spdlog, SIMDe, ImGui,
+toml++, inja, o1heap and aes_128 (MIT), xxHash (BSD-2-Clause), CLI11
+(BSD-3-Clause), and utfcpp (Boost Software License). Shader tooling can use
+SPIRV-Cross (Apache-2.0) and uam (zlib with separately licensed Mesa parts).
+Their reproduced license texts are in LICENSES/; additional notices are in
+the pinned source trees. FFmpeg's Switch overlay is included in the pinned SDK.
+For dependency rebuilding and relinking, see docs/RELINKING.md.
+
+libnx, deko3d, the compiler and runtime libraries are obtained from devkitPro;
+see LICENSES/libnx-license.txt, LICENSES/deko3d-license.txt and
+LICENSES/gcc-runtime-notices.txt (including the GCC Runtime Library Exception).
+Their other upstream notices also apply. This repository does not
+include the Xbox executable or game content files. The separately distributed
+release shader library contains game shader program bytes and translated SPIR-V.
+Users must supply their own supported game data.
+
+Mini Ninjas, Xbox and Nintendo Switch are trademarks of their respective owners.
+This project is not affiliated with or endorsed by them.

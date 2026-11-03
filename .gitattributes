@@ -1,0 +1,10 @@
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.cjs text eol=lf
+*.js text eol=lf
+*.cpp text eol=lf
+*.h text eol=lf
+*.patch text eol=lf
+*.png binary
+*.jpg binary

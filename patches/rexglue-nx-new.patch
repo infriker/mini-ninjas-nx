@@ -1,0 +1,415 @@
+diff --git a/include/rex/x360/deko/binding_cache.h b/include/rex/x360/deko/binding_cache.h
+new file mode 100755
+index 0000000..6eb8597
+--- /dev/null
++++ b/include/rex/x360/deko/binding_cache.h
+@@ -0,0 +1,38 @@
++#pragma once
++
++#include <array>
++#include <cstdint>
++
++namespace rex::x360::deko_bindings {
++
++// Records only state already emitted to the current command list. In particular,
++// this does not cache guest data or infer that a guest buffer is unchanged.
++class BufferBindings {
++ public:
++  void Reset() {
++    for (auto& vertex : vertices_) vertex.valid = false;
++    index_.valid = false;
++  }
++
++  bool SetVertex(uint32_t slot, uint64_t address, uint32_t size) {
++    if (slot >= vertices_.size()) return true;  // Do not cache an unknown slot.
++    auto& vertex = vertices_[slot];
++    if (vertex.valid && vertex.address == address && vertex.size == size) return false;
++    vertex = {address, size, true};
++    return true;
++  }
++
++  bool SetIndex(uint64_t address, uint32_t format) {
++    if (index_.valid && index_.address == address && index_.format == format) return false;
++    index_ = {address, format, true};
++    return true;
++  }
++
++ private:
++  struct Vertex { uint64_t address = 0; uint32_t size = 0; bool valid = false; };
++  struct Index { uint64_t address = 0; uint32_t format = 0; bool valid = false; };
++  std::array<Vertex, 16> vertices_{};
++  Index index_{};
++};
++
++}  // namespace rex::x360::deko_bindings
+diff --git a/include/rex/x360/deko/horizontal_resolve.h b/include/rex/x360/deko/horizontal_resolve.h
+new file mode 100755
+index 0000000..5a87e27
+--- /dev/null
++++ b/include/rex/x360/deko/horizontal_resolve.h
+@@ -0,0 +1,170 @@
++// Guarded four-strip Xenos resolve sequence. This does not perform any copies.
++#pragma once
++
++#include <cstdint>
++
++namespace rex::x360::resolve {
++struct HorizontalStrip {
++  uint64_t frame;
++  uint32_t surface, color, dest_info, control;
++  uint32_t pitch, dest_pitch, dest_height, dest_base;
++  uint32_t x0, y0, x1, y1, window_offset, sc_mode;
++};
++struct HorizontalResult {
++  uint32_t base;
++  uint32_t dx;
++  bool merged;
++  bool started;
++  uint64_t previous_version = UINT64_MAX;
++};
++
++class HorizontalSequence {
++ public:
++  // Read-only state for managing independently interleaved resolve sequences.
++  struct TraceState {
++    uint64_t frame, extent;
++    uint32_t surface, color, info, control, pitch, dest_pitch, height, base, next;
++    bool active;
++  };
++  TraceState Trace() const {
++    return {frame_, extent_, surface_, color_, info_, control_, pitch_, dest_pitch_, height_, base_, next_, active_};
++  }
++  void Reset() { active_ = false; }
++  void InvalidateOverlapping(uint32_t base, uint64_t size) {
++    if (active_ && uint64_t(base) < uint64_t(base_) + extent_ && uint64_t(base_) < uint64_t(base) + size)
++      active_ = false;
++  }
++  HorizontalResult Observe(const HorizontalStrip& s, bool allow_repeat = false) {
++    const HorizontalResult unchanged{s.dest_base, 0, false, false};
++    // Only the documented 4x, 4-byte, four equal vertical strips pattern.
++    const uint32_t msaa = (s.surface >> 16) & 3;
++    const uint32_t format = (s.dest_info >> 7) & 63;
++    const int32_t wx = int32_t((s.window_offset & 0x7FFFu) << 17) >> 17;
++    const int32_t wy = int32_t(((s.window_offset >> 16) & 0x7FFFu) << 17) >> 17;
++    if (msaa != 2 || format != 6 || (s.dest_info & 8) || !s.pitch || (s.pitch & 31) ||
++        uint64_t(s.pitch) * 4 != s.dest_pitch || !s.dest_height || s.x0 || s.y0 ||
++        s.x1 != s.pitch || s.y1 != s.dest_height || !(s.sc_mode & (1u << 16)) || wy || wx > 0 ||
++        (s.dest_base & 0xFFFu)) {
++      active_ = false;
++      return unchanged;
++    }
++    const uint32_t x = uint32_t(-wx);
++    if (x % s.pitch || x / s.pitch > 3) {
++      active_ = false;
++      return unchanged;
++    }
++    // Horizontal tiled offset for 32x32 tiles of four-byte texels, y=0.
++    const uint64_t tile_offset = uint64_t(x / 32) * 4096;
++    const uint32_t control = s.control & ~(3u << 8);  // clear flags may differ per strip
++    if (!x) {
++      const uint64_t extent = ((uint64_t(s.dest_height) + 31) / 32) * 32 * uint64_t(s.dest_pitch) * 4;
++      if (uint64_t(s.dest_base) + extent > 0x20000000ull) {
++        active_ = false;
++        return unchanged;
++      }
++      frame_ = s.frame; surface_ = s.surface; color_ = s.color; info_ = s.dest_info;
++      control_ = control; pitch_ = s.pitch; dest_pitch_ = s.dest_pitch; height_ = s.dest_height;
++      base_ = s.dest_base; extent_ = extent; next_ = 1; active_ = true;
++      return {s.dest_base, 0, false, true};
++    }
++    const uint32_t index = x / s.pitch;
++    const bool repeat = allow_repeat && next_ > 1 && index == next_ - 1;
++    if (!active_ || s.frame != frame_ || s.surface != surface_ || s.color != color_ || s.dest_info != info_ ||
++        control != control_ || s.pitch != pitch_ || s.dest_pitch != dest_pitch_ || s.dest_height != height_ ||
++        (index != next_ && !repeat) || uint64_t(base_) + tile_offset != s.dest_base) {
++      active_ = false;
++      return unchanged;
++    }
++    if (!repeat && ++next_ == 4 && !allow_repeat) active_ = false;
++    return {base_, x, true, false};
++  }
++
++ private:
++  uint64_t frame_ = 0;
++  uint64_t extent_ = 0;
++  uint32_t surface_ = 0, color_ = 0, info_ = 0, control_ = 0;
++  uint32_t pitch_ = 0, dest_pitch_ = 0, height_ = 0, base_ = 0, next_ = 0;
++  bool active_ = false;
++};
++
++// Independent targets can be resolved one strip at a time, interleaved in a
++// single frame. Never merge overlapping owners or carry an unfinished sequence
++// into another frame. Individual sequences retain all the checks above.
++class HorizontalSequences {
++ public:
++  explicit HorizontalSequences(bool allow_repeats = false) : allow_repeats_(allow_repeats) {}
++  void Reset() { for (auto& entry : entries_) entry.sequence.Reset(); }
++  void InvalidateOverlapping(uint32_t base, uint64_t size) {
++    for (auto& entry : entries_) entry.sequence.InvalidateOverlapping(base, size);
++  }
++  void InvalidateOwner(uint32_t base) {
++    for (auto& entry : entries_) {
++      const auto state = entry.sequence.Trace();
++      if (state.base == base) entry.sequence.Reset();
++    }
++  }
++  void SetPreviousVersion(uint32_t base, uint64_t version) {
++    for (auto& entry : entries_) {
++      const auto state = entry.sequence.Trace();
++      if (state.active && state.base == base) { entry.previous_version = version; return; }
++    }
++  }
++  HorizontalResult Observe(const HorizontalStrip& s) {
++    const HorizontalResult unchanged{s.dest_base, 0, false, false};
++    for (auto& entry : entries_) {
++      const auto state = entry.sequence.Trace();
++      if (state.active && state.frame != s.frame) entry.sequence.Reset();
++    }
++    const int32_t wx = int32_t((s.window_offset & 0x7FFFu) << 17) >> 17;
++    if (!s.pitch || wx > 0 || uint32_t(-wx) % s.pitch || uint32_t(-wx) / s.pitch > 3) {
++      Reset();  // an unclassifiable write cannot safely preserve pending sequences
++      return unchanged;
++    }
++    const uint32_t x = uint32_t(-wx);
++    const uint64_t offset = uint64_t(x / 32) * 4096;
++    if ((x & 31) || offset > s.dest_base) { Reset(); return unchanged; }
++    const uint32_t owner = s.dest_base - uint32_t(offset);
++    if (!x) {
++      HorizontalSequence candidate;
++      const auto result = candidate.Observe(s, allow_repeats_);
++      if (!result.started) { Reset(); return unchanged; }
++      const auto proposed = candidate.Trace();
++      Entry* available = nullptr;
++      bool collision = false;
++      for (auto& entry : entries_) {
++        const auto state = entry.sequence.Trace();
++        if (state.active && state.base == owner) entry.sequence.Reset();
++        else if (state.active && uint64_t(owner) < uint64_t(state.base) + state.extent &&
++                 uint64_t(state.base) < uint64_t(owner) + proposed.extent) {
++          entry.sequence.Reset();
++          collision = true;
++        }
++        if (!entry.sequence.Trace().active && !available) available = &entry;
++      }
++      if (collision || !available) return unchanged;
++      available->sequence = candidate;
++      available->previous_version = UINT64_MAX; // caller must install the old owner version
++      return result;
++    }
++    for (auto& entry : entries_) {
++      const auto state = entry.sequence.Trace();
++      if (state.active && state.base == owner) {
++        auto result = entry.sequence.Observe(s, allow_repeats_);
++        result.previous_version = entry.previous_version;
++        // A malformed/mismatching write may have a different footprint, so it
++        // cannot safely leave other pending owners alive without a full layout.
++        if (!result.merged) Reset();
++        return result;
++      }
++    }
++    // Unknown write: invalidate any guest destination it could overlap.
++    const uint64_t extent = ((uint64_t(s.dest_height) + 31) / 32) * 32 * uint64_t(s.dest_pitch) * 4;
++    InvalidateOverlapping(s.dest_base, extent);
++    return unchanged;
++  }
++ private:
++  struct Entry { HorizontalSequence sequence; uint64_t previous_version = UINT64_MAX; };
++  Entry entries_[8]{};
++  bool allow_repeats_;
++};
++}  // namespace rex::x360::resolve
+diff --git a/include/rex/x360/deko/minininjas_full_frame.h b/include/rex/x360/deko/minininjas_full_frame.h
+new file mode 100755
+index 0000000..ac84780
+--- /dev/null
++++ b/include/rex/x360/deko/minininjas_full_frame.h
+@@ -0,0 +1,31 @@
++#pragma once
++
++#include <cstdint>
++
++#include <rex/x360/deko/horizontal_resolve.h>
++
++namespace rex::x360::minininjas_full_frame {
++
++// The verified 320-pixel tiled scene used surface 0x05020140 and color 0.
++// Its expected depth register is separately supplied by the app
++// because the guest can recompute the depth base after expanding the target.
++constexpr bool Matches(bool enabled, bool edram_tile_ownership, uint32_t surface,
++                       uint32_t color0, uint32_t depth, uint32_t expected_depth = 0x000002D0u) {
++  return enabled && !edram_tile_ownership && surface == 0x14020500u &&
++         color0 == 0u && depth == expected_depth;
++}
++
++constexpr bool IsFullWidth4x(uint32_t surface) {
++  return (surface & 0x3FFFu) == 1280u && ((surface >> 16) & 3u) == 2u;
++}
++
++inline void InvalidateCopy(resolve::HorizontalSequences& sequences, uint32_t base,
++                           uint32_t pitch, uint32_t height) {
++  const uint64_t w = ((uint64_t(pitch) + 31) / 32) * 32;
++  const uint64_t h = ((uint64_t(height) + 31) / 32) * 32;
++  const uint64_t size = w * h * 4;
++  if (!size || uint64_t(base) + size > 0x20000000ull) sequences.Reset();
++  else sequences.InvalidateOverlapping(base, size);
++}
++
++}  // namespace rex::x360::minininjas_full_frame
+diff --git a/include/rex/x360/deko/msaa_select.h b/include/rex/x360/deko/msaa_select.h
+new file mode 100755
+index 0000000..6dfc30f
+--- /dev/null
++++ b/include/rex/x360/deko/msaa_select.h
+@@ -0,0 +1,19 @@
++#pragma once
++
++#include <cstdint>
++
++namespace rex::x360::msaa {
++
++// A pass key records sample-space pitch in bits 0..15 and 4x MSAA in bits
++// 20..21. All five render targets participate, including depth-only passes.
++constexpr bool SelectNative4x(const uint64_t* keys, uint32_t minimum_sample_pitch) {
++  for (uint32_t i = 0; i < 5; ++i) {
++    const uint64_t key = keys[i];
++    if (key && ((key >> 20) & 0x3) == 2 && (key & 0xFFFF) >= minimum_sample_pitch) {
++      return true;
++    }
++  }
++  return false;
++}
++
++}  // namespace rex::x360::msaa
+diff --git a/include/rex/x360/deko/storage_buffer_eden.h b/include/rex/x360/deko/storage_buffer_eden.h
+new file mode 100755
+index 0000000..be7e57a
+--- /dev/null
++++ b/include/rex/x360/deko/storage_buffer_eden.h
+@@ -0,0 +1,34 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Derived from infriker/fear-nx deko_buffer_descriptor.h (commit a671c7b).
++#pragma once
++
++#include <deko3d.h>
++#include <array>
++#include <bit>
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++#include <type_traits>
++
++namespace rex::deko3d {
++
++// deko3d copies the entire 16-byte extent into its descriptor, including the
++// otherwise unspecified padding after size. Eden can interpret nonzero
++// padding as part of an address and fall back to an incorrect buffer extent.
++inline void InitializeStorageExtent(DkBufExtents& extent, DkGpuAddr address, uint32_t size) {
++  static_assert(std::endian::native == std::endian::little);
++  static_assert(std::is_trivially_copyable_v<DkBufExtents> && sizeof(DkBufExtents) == 16);
++  static_assert(offsetof(DkBufExtents, addr) == 0 && offsetof(DkBufExtents, size) == 8);
++  static_assert(sizeof(extent.addr) == 8 && sizeof(extent.size) == 4);
++  const std::array<uint64_t, 2> wire{static_cast<uint64_t>(address), static_cast<uint64_t>(size)};
++  std::memcpy(&extent, wire.data(), sizeof(wire));
++}
++
++inline void BindStorageBuffer(DkCmdBuf cmd, DkStage stage, uint32_t index,
++                              DkGpuAddr address, uint32_t size) {
++  DkBufExtents extent;
++  InitializeStorageExtent(extent, address, size);
++  dkCmdBufBindStorageBuffers(cmd, stage, index, &extent, 1);
++}
++
++}  // namespace rex::deko3d
+diff --git a/include/rex/x360/deko/vfetch_inheritance.h b/include/rex/x360/deko/vfetch_inheritance.h
+new file mode 100755
+index 0000000..6a7af16
+--- /dev/null
++++ b/include/rex/x360/deko/vfetch_inheritance.h
+@@ -0,0 +1,36 @@
++// Xenos mini vertex fetches inherit address operands from the last full fetch.
++#pragma once
++
++#include <cstdint>
++
++namespace rex::x360::vfetch {
++struct FetchAddress {
++  uint32_t slot;
++  uint32_t stride;
++  uint32_t index_register;
++  uint32_t index_component;
++  bool rounded;
++};
++
++inline bool ResolveFetchAddress(const uint32_t* fetch, const uint32_t* previous_full,
++                                FetchAddress& result) {
++  const bool mini = (fetch[1] & (uint32_t{1} << 30)) != 0;
++  if (mini && (!previous_full || (previous_full[1] & (uint32_t{1} << 30)))) return false;
++  const uint32_t* address = mini ? previous_full : fetch;
++  result.slot = ((address[0] >> 20) & 31) * 3 + ((address[0] >> 25) & 3);
++  result.stride = (address[2] & 255) * 4;
++  result.index_register = (address[0] >> 5) & 63;
++  result.index_component = address[0] >> 30;
++  result.rounded = ((address[1] >> 15) & 1) != 0;
++  return true;
++}
++
++// A mini fetch may be rendered only if the translated shader reads the same
++// index and rounding mode as the full fetch whose address it inherits.
++inline bool MiniFetchIndexMatches(const FetchAddress& inherited, bool original_valid,
++                                  uint32_t original_register, uint32_t original_component,
++                                  bool original_rounded) {
++  return original_valid && inherited.index_register == original_register &&
++         inherited.index_component == original_component && inherited.rounded == original_rounded;
++}
++}  // namespace rex::x360::vfetch
+diff --git a/src/x360/deko/geometry_fingerprint.h b/src/x360/deko/geometry_fingerprint.h
+new file mode 100755
+index 0000000..a8c4c62
+--- /dev/null
++++ b/src/x360/deko/geometry_fingerprint.h
+@@ -0,0 +1,45 @@
++#pragma once
++
++// Exact geometry fingerprints. A null phases pointer selects a full-content
++// fingerprint without computing sampling-only phase hashes. Include xxHash
++// with XXH_INLINE_ALL so fixed 64-byte lines use the inlined implementation.
++#include <cstdint>
++#include <xxhash.h>
++
++namespace rex::deko3d::geometry_fingerprint {
++constexpr uint32_t kLine = 64;
++constexpr uint32_t kPhases = 8;
++
++inline uint64_t Fold(uint64_t h, uint64_t v) {
++  h ^= v;
++  h *= 0x9E3779B97F4A7C15ull;
++  return h ^ (h >> 29);
++}
++
++inline uint64_t LineHash(const uint8_t* data, uint32_t bytes, uint32_t i) {
++  const uint32_t start = i * kLine;
++  if (bytes - start >= kLine) return XXH3_64bits(data + start, kLine);
++  return XXH3_64bits(data + start, bytes - start);
++}
++
++inline uint64_t Calculate(const uint8_t* data, uint32_t bytes, uint64_t* phases) {
++  const uint32_t lines = (bytes + kLine - 1) / kLine;
++  if (lines <= kPhases) return XXH3_64bits(data, bytes);
++  uint64_t whole = 0x243F6A8885A308D3ull;
++  if (!phases) {
++    for (uint32_t i = 0; i < lines; ++i) whole = Fold(whole, LineHash(data, bytes, i));
++    return whole;
++  }
++  for (uint32_t p = 0; p < kPhases; ++p) phases[p] = 0x13198A2E03707344ull + p;
++  uint64_t first = 0, last = 0;
++  for (uint32_t i = 0; i < lines; ++i) {
++    const uint64_t h = LineHash(data, bytes, i);
++    whole = Fold(whole, h);
++    phases[i % kPhases] = Fold(phases[i % kPhases], h);
++    if (!i) first = h;
++    last = h;
++  }
++  for (uint32_t p = 0; p < kPhases; ++p) phases[p] = Fold(Fold(phases[p], first), last);
++  return whole;
++}
++}  // namespace rex::deko3d::geometry_fingerprint
