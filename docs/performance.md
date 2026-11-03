@@ -1,8 +1,9 @@
 # Performance
 
-On my Nintendo Switch at stock clocks, gameplay runs at **40–60 FPS**. The
-result depends on the scene and camera direction. The port leaves clocks to
-the system and does not impose a 30 FPS limit.
+On my Nintendo Switch, gameplay runs at **40–60 FPS** (test profile: **CPU
+1040 MHz, GPU 460 MHz**). The result depends on the scene and camera direction.
+The port leaves clocks to the system and does not force an overclock or impose
+a 30 FPS limit.
 
 ## One full-screen scene
 

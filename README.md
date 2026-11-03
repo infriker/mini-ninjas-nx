@@ -43,8 +43,9 @@ Keep your existing save directories when updating.
 
 ## Performance
 
-On my Nintendo Switch at **stock clocks**, gameplay runs at **40–60 FPS**,
-depending on the scene. The port does not force an overclock or a 30 FPS cap.
+On my Nintendo Switch, gameplay runs at **40–60 FPS** depending on the scene
+(test profile: **CPU 1040 MHz, GPU 460 MHz**). The port does not force an
+overclock or a 30 FPS cap.
 
 - Main scene rendered at **1280×720** with **hardware 4× MSAA**.
 - One full-screen scene region instead of the original four 320-pixel strips.
