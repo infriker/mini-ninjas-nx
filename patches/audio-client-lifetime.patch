@@ -1,0 +1,302 @@
+diff --git a/include/rex/audio/audio_client_slot.h b/include/rex/audio/audio_client_slot.h
+new file mode 100644
+index 0000000..bbb96c2
+--- /dev/null
++++ b/include/rex/audio/audio_client_slot.h
+@@ -0,0 +1,45 @@
++// Audio callback lease state. All operations require AudioSystem's global lock.
++#pragma once
++#include <cstdint>
++
++namespace rex::audio {
++class AudioDriver;
++
++struct AudioClientSlot {
++  AudioDriver* driver = nullptr;
++  uint32_t callback = 0;
++  uint32_t callback_arg = 0;
++  uint32_t wrapped_callback_arg = 0;
++  uint32_t in_flight = 0;
++  bool in_use = false;
++  bool retired = false;
++
++  bool Acquire(uint32_t& out_callback, uint32_t& out_arg) {
++    if (!in_use || retired || !callback || !driver) return false;
++    ++in_flight;
++    out_callback = callback;
++    out_arg = wrapped_callback_arg;
++    return true;
++  }
++
++  // Returns the guest allocation to free, or zero while a lease remains.
++  uint32_t Retire() {
++    retired = true;
++    callback = 0;
++    return ReclaimIfIdle();
++  }
++
++  uint32_t Complete() {
++    if (!in_flight) return 0;
++    --in_flight;
++    return ReclaimIfIdle();
++  }
++
++  uint32_t ReclaimIfIdle() {
++    if (!retired || in_flight) return 0;
++    const uint32_t ptr = wrapped_callback_arg;
++    *this = {};
++    return ptr;
++  }
++};
++}  // namespace rex::audio
+diff --git a/include/rex/audio/audio_system.h b/include/rex/audio/audio_system.h
+index 28e92e7..29d38be 100644
+--- a/include/rex/audio/audio_system.h
++++ b/include/rex/audio/audio_system.h
+@@ -14,6 +14,7 @@
+ #include <atomic>
+ #include <queue>
+ 
++#include <rex/audio/audio_client_slot.h>
+ #include <rex/kernel.h>
+ #include <rex/memory.h>
+ #include <rex/system/interfaces/audio.h>
+@@ -85,13 +86,10 @@ class AudioSystem : public system::IAudioSystem {
+ 
+   rex::thread::global_critical_region global_critical_region_;
+   static const size_t kMaximumClientCount = 8;
+-  struct {
+-    AudioDriver* driver;
+-    uint32_t callback;
+-    uint32_t callback_arg;
+-    uint32_t wrapped_callback_arg;
+-    bool in_use;
+-  } clients_[kMaximumClientCount];
++  AudioClientSlot clients_[kMaximumClientCount];
++
++  void ReleaseCallback(size_t index);
++  void DrainClientSemaphore(size_t index);
+ 
+   int FindFreeClient();
+ 
+diff --git a/src/audio/audio_system.cpp b/src/audio/audio_system.cpp
+index 78561b6..5e38865 100644
+--- a/src/audio/audio_system.cpp
++++ b/src/audio/audio_system.cpp
+@@ -65,8 +65,6 @@ AudioSystem::AudioSystem(runtime::FunctionDispatcher* function_dispatcher)
+     : memory_(function_dispatcher->memory()),
+       function_dispatcher_(function_dispatcher),
+       worker_running_(false) {
+-  std::memset(clients_, 0, sizeof(clients_));
+-
+   queued_frames_ = std::min(
+       static_cast<uint32_t>(kMaximumQueuedFrames),
+       std::max(static_cast<uint32_t>(REXCVAR_GET(audio_maxqframes)), static_cast<uint32_t>(4)));
+@@ -158,11 +156,14 @@ void AudioSystem::WorkerThreadMain() {
+       auto index = result.second;
+ 
+       auto global_lock = global_critical_region_.Acquire();
+-      uint32_t client_callback = clients_[index].callback;
+-      uint32_t client_callback_arg = clients_[index].wrapped_callback_arg;
++      uint32_t client_callback = 0;
++      uint32_t client_callback_arg = 0;
++      const bool leased = clients_[index].Acquire(client_callback, client_callback_arg);
+       global_lock.unlock();
+ 
+-      if (client_callback) {
++      if (leased) {
++        auto release = [this, index](AudioSystem*) { ReleaseCallback(index); };
++        std::unique_ptr<AudioSystem, decltype(release)> callback_lease(this, release);
+         if (diag_pump_count < 10) {
+           REXAPU_DEBUG("AudioWorker: dispatching callback {:08X} with arg {:08X} for client {}",
+                        client_callback, client_callback_arg, index);
+@@ -244,11 +245,11 @@ void AudioSystem::Shutdown() {
+   // callback threads) before the semaphores they reference are destroyed.
+   for (size_t i = 0; i < kMaximumClientCount; i++) {
+     if (clients_[i].in_use) {
+-      DestroyDriver(clients_[i].driver);
++      if (clients_[i].driver) DestroyDriver(clients_[i].driver);
+       if (clients_[i].wrapped_callback_arg) {
+         memory()->SystemHeapFree(clients_[i].wrapped_callback_arg);
+       }
+-      clients_[i] = {nullptr, 0, 0, 0, false};
++      clients_[i] = {};
+     }
+   }
+ }
+@@ -259,25 +260,35 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg, s
+   auto global_lock = global_critical_region_.Acquire();
+ 
+   auto index = FindFreeClient();
+-  assert_true(index >= 0);
++  if (index < 0) return X_STATUS_INSUFFICIENT_RESOURCES;
+   REXAPU_DEBUG("AudioSystem::RegisterClient: using client index={} queued_frames={}", index,
+                queued_frames_);
+ 
+   auto client_semaphore = client_semaphores_[index].get();
+   auto ret = client_semaphore->Release(queued_frames_, nullptr);
+-  assert_true(ret);
++  if (!ret) return X_STATUS_INSUFFICIENT_RESOURCES;
+ 
+-  AudioDriver* driver;
++  AudioDriver* driver = nullptr;
+   auto result = CreateDriver(index, client_semaphore, &driver);
+   if (XFAILED(result)) {
++    if (driver) DestroyDriver(driver);
++    DrainClientSemaphore(index);
+     return result;
+   }
+-  assert_not_null(driver);
++  if (!driver) {
++    DrainClientSemaphore(index);
++    return X_STATUS_UNSUCCESSFUL;
++  }
+ 
+   uint32_t ptr = memory()->SystemHeapAlloc(0x4);
++  if (!ptr) {
++    DestroyDriver(driver);
++    DrainClientSemaphore(index);
++    return X_STATUS_NO_MEMORY;
++  }
+   memory::store_and_swap<uint32_t>(memory()->TranslateVirtual(ptr), callback_arg);
+ 
+-  clients_[index] = {driver, callback, callback_arg, ptr, true};
++  clients_[index] = {driver, callback, callback_arg, ptr, 0, true, false};
+ 
+   if (out_index) {
+     *out_index = index;
+@@ -297,37 +308,51 @@ void AudioSystem::SubmitFrame(size_t index, uint32_t samples_ptr) {
+   }
+ 
+   auto global_lock = global_critical_region_.Acquire();
+-  assert_true(index < kMaximumClientCount);
+-  assert_true(clients_[index].driver != NULL);
++  if (index >= kMaximumClientCount || !clients_[index].in_use || clients_[index].retired ||
++      !clients_[index].driver) {
++    static std::atomic<uint32_t> dropped{0};
++    if (dropped.fetch_add(1, std::memory_order_relaxed) < 8) {
++      REXAPU_WARN("AudioSystem::SubmitFrame: inactive client {}", index);
++    }
++    return;
++  }
+   (clients_[index].driver)->SubmitFrame(samples_ptr);
+ }
+ 
++void AudioSystem::ReleaseCallback(size_t index) {
++  auto global_lock = global_critical_region_.Acquire();
++  const uint32_t ptr = clients_[index].Complete();
++  if (ptr) memory()->SystemHeapFree(ptr);
++}
++
++void AudioSystem::DrainClientSemaphore(size_t index) {
++  auto* semaphore = client_semaphores_[index].get();
++  while (rex::thread::Wait(semaphore, false, std::chrono::milliseconds(0)) ==
++         rex::thread::WaitResult::kSuccess) {}
++}
++
+ void AudioSystem::UnregisterClient(size_t index) {
+   SCOPE_profile_cpu_f("apu");
+ 
+   auto global_lock = global_critical_region_.Acquire();
+-  assert_true(index < kMaximumClientCount);
+-  DestroyDriver(clients_[index].driver);
+-  memory()->SystemHeapFree(clients_[index].wrapped_callback_arg);
+-  clients_[index] = {nullptr, 0, 0, 0, false};
+-
+-  // Drain the semaphore of its count.
+-  auto client_semaphore = client_semaphores_[index].get();
+-  rex::thread::WaitResult wait_result;
+-  do {
+-    wait_result = rex::thread::Wait(client_semaphore, false, std::chrono::milliseconds(0));
+-  } while (wait_result == rex::thread::WaitResult::kSuccess);
+-  assert_true(wait_result == rex::thread::WaitResult::kTimeout);
++  if (index >= kMaximumClientCount || !clients_[index].in_use || clients_[index].retired) return;
++  auto* driver = clients_[index].driver;
++  clients_[index].driver = nullptr;
++  const uint32_t ptr = clients_[index].Retire();
++  if (driver) DestroyDriver(driver);
++  DrainClientSemaphore(index);
++  if (ptr) memory()->SystemHeapFree(ptr);
+ }
+ 
+ bool AudioSystem::Save(stream::ByteStream* stream) {
++  auto global_lock = global_critical_region_.Acquire();
+   stream->Write(kAudioSaveSignature);
+ 
+   // Count the number of used clients first.
+   // Any gaps should be handled gracefully.
+   uint32_t used_clients = 0;
+   for (size_t i = 0; i < kMaximumClientCount; i++) {
+-    if (clients_[i].in_use) {
++    if (clients_[i].in_use && !clients_[i].retired) {
+       used_clients++;
+     }
+   }
+@@ -335,7 +360,7 @@ bool AudioSystem::Save(stream::ByteStream* stream) {
+   stream->Write(used_clients);
+   for (uint32_t i = 0; i < kMaximumClientCount; i++) {
+     auto& client = clients_[i];
+-    if (!client.in_use) {
++    if (!client.in_use || client.retired) {
+       continue;
+     }
+ 
+@@ -355,30 +380,30 @@ bool AudioSystem::Restore(stream::ByteStream* stream) {
+   }
+ 
+   uint32_t num_clients = stream->Read<uint32_t>();
++  if (num_clients > kMaximumClientCount) return false;
+   for (uint32_t i = 0; i < num_clients; i++) {
+     auto id = stream->Read<uint32_t>();
+-    assert_true(id < kMaximumClientCount);
+-
++    if (id >= kMaximumClientCount) return false;
++    const uint32_t callback = stream->Read<uint32_t>();
++    const uint32_t callback_arg = stream->Read<uint32_t>();
++    const uint32_t wrapped_callback_arg = stream->Read<uint32_t>();
++
++    // Retire the previous client without waiting for guest code. A saved slot
++    // cannot overwrite an outstanding callback lease.
++    UnregisterClient(id);
++    auto global_lock = global_critical_region_.Acquire();
+     auto& client = clients_[id];
+-
+-    // Reset the semaphore and recreate the driver ourselves.
+-    if (client.driver) {
+-      UnregisterClient(id);
+-    }
+-
+-    client.callback = stream->Read<uint32_t>();
+-    client.callback_arg = stream->Read<uint32_t>();
+-    client.wrapped_callback_arg = stream->Read<uint32_t>();
+-
+-    client.in_use = true;
++    if (client.in_use) return false;
+ 
+     auto client_semaphore = client_semaphores_[id].get();
+     auto ret = client_semaphore->Release(queued_frames_, nullptr);
+-    assert_true(ret);
++    if (!ret) return false;
+ 
+     AudioDriver* driver = nullptr;
+     auto status = CreateDriver(id, client_semaphore, &driver);
+     if (XFAILED(status)) {
++      if (driver) DestroyDriver(driver);
++      DrainClientSemaphore(id);
+       REXAPU_ERROR(
+           "AudioSystem::Restore - Call to CreateDriver failed with status "
+           "{:08X}",
+@@ -386,8 +411,11 @@ bool AudioSystem::Restore(stream::ByteStream* stream) {
+       return false;
+     }
+ 
+-    assert_not_null(driver);
+-    client.driver = driver;
++    if (!driver) {
++      DrainClientSemaphore(id);
++      return false;
++    }
++    client = {driver, callback, callback_arg, wrapped_callback_arg, 0, true, false};
+   }
+ 
+   return true;

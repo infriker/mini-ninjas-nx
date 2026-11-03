@@ -29,6 +29,9 @@ NFSMW-NX. Those attributions are retained in the installer notices.
 - Fix the loader and memory behavior required for level loading.
 - Optimize generated helper calls without rewriting the game's logic or
   weakening synchronization.
+- Keep active audio callbacks alive during client teardown and reject late
+  submissions to a removed driver. This prevents a null-driver crash when
+  skipping the opening movie before its audio callback finishes.
 
 ## Rendering
 

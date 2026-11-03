@@ -46,5 +46,5 @@ target_compile_definitions(mini-ninjas PRIVATE MINININJAS_DEKO3D=1 MINININJAS_NA
 target_link_libraries(mini-ninjas PRIVATE minininjas_recomp rex::runtime)
 rexglue_configure_target(mini-ninjas)
 rexglue_switch_add_deko3d(mini-ninjas)
-rexglue_switch_add_nro(mini-ninjas NAME "Mini Ninjas NX" AUTHOR "infriker" VERSION "1.0.0"
+rexglue_switch_add_nro(mini-ninjas NAME "Mini Ninjas NX" AUTHOR "infriker" VERSION "1.0.1"
   ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/icon.jpg")

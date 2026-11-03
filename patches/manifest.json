@@ -13,6 +13,10 @@
     {
       "path": "runtime-logging.patch",
       "sha256": "2a9bd729c3ed64d39ab0042c84e88c3113c654e561c33a04a3456ab77480945f"
+    },
+    {
+      "path": "audio-client-lifetime.patch",
+      "sha256": "93a567b944da62ca8c9a18190087984e27f22555a0040b482622b3b6decf795b"
     }
   ],
   "submodule_commits": {
