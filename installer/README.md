@@ -20,6 +20,11 @@ port release and must remain the supported one. The Pages workflow downloads
 the pinned assets, checks both hashes, and builds the site. A missing hash or
 tag makes the workflow fail instead of publishing an unverified installer.
 
+Commit the manifest to `main`, then run **Actions → Publish installer → Run
+workflow** with `main` selected. Deployment uses the main branch allowed by
+the GitHub Pages environment; publishing a release tag alone does not deploy
+the installer.
+
 The runtime ZIP may contain files at its root or under `mini-ninjas/`. It must
 include `minininjas_shaders.dslib`; `shadercache_dksh.bin`, `minininjas.toml`,
 license files and a `LICENSES/` directory are allowed. The archive must not
