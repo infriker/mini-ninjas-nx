@@ -1,13 +1,13 @@
 {
-  "version": "1.0.2",
-  "tag": "v1.0.2",
+  "version": "1.0.3",
+  "tag": "v1.0.3",
   "builds": [
     {
       "edition": "Supported Xbox 360 release",
       "xex_sha256": "2747afb17badc9832ca6fbc8d06ddb309b23205410902180b525a5373c8bdce6",
       "xex_size": 7712768,
       "nro": "mini-ninjas.nro",
-      "nro_sha256": "6ff61662c24f07ac70d9e342259f0affc0d0d95738b63b2b0da5aedd1a7d1772",
+      "nro_sha256": "472b7b0660fd3c2faeca3425742e298e44322314bd1b8414a545a04e9e99f110",
       "runtime": "mini-ninjas-runtime.zip",
       "runtime_sha256": "7b924da49a0ccc134398c707bb32fbb17f3d506a0c2d482997153caa26879164"
     }

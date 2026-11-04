@@ -17,6 +17,10 @@
     {
       "path": "audio-client-lifetime.patch",
       "sha256": "93a567b944da62ca8c9a18190087984e27f22555a0040b482622b3b6decf795b"
+    },
+    {
+      "path": "minininjas-depth-bias.patch",
+      "sha256": "174c7e13e91df3c218a36cd6903d5a381ee03187407ef3925459abfaa9ce50f7"
     }
   ],
   "submodule_commits": {

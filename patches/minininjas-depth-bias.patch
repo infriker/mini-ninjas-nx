@@ -1,0 +1,33 @@
+diff --git a/src/x360/deko/dibujos.cpp b/src/x360/deko/dibujos.cpp
+index ad06497..b9d559e 100644
+--- a/src/x360/deko/dibujos.cpp
++++ b/src/x360/deko/dibujos.cpp
+@@ -436,6 +436,14 @@ bool AtributoDe(uint32_t formato, bool entrada_entera, bool con_signo, bool ente
+   }
+ }
+ 
++// The full-frame Mini Ninjas prepass can be depth-only with a stale color0
++// register. Match the actual depth surface independently of color bindings:
++// it is not an NFSMW shadow target, so it must not acquire synthetic bias.
++constexpr bool EsProfundidadPrincipalMini(bool enabled, bool tile_ownership, uint32_t surface,
++                                          uint32_t depth, uint32_t expected_depth) {
++  return enabled && !tile_ownership && surface == 0x14020500u && depth == expected_depth;
++}
++
+ // Xenos blend factor -> deko3d (the Vulkan backend's kFactores).
+ DkBlendFactor FactorDe(uint32_t f) {
+   switch (f) {
+@@ -1557,7 +1565,12 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+                                                 ? float(uint32_t(1) << 24)
+                                                 : float((uint32_t(1) << 24) - 1)),
+                     escala_sesgo * (1.0f / 16.0f)};
+-  if (destino_sombras && tipo >= 4 && sesgo[0] == 0.0f && sesgo[1] == 0.0f) {
++  static const bool tile_ownership = REXCVAR_GET(deko_edram_baldosas);
++  static const uint32_t profundidad_principal = uint32_t(REXCVAR_GET(deko_minininjas_full_frame_depth_info));
++  const bool profundidad_mini = EsProfundidadPrincipalMini(
++      full_frame_enabled, tile_ownership, r[gr::XE_GPU_REG_RB_SURFACE_INFO],
++      r[gr::XE_GPU_REG_RB_DEPTH_INFO], profundidad_principal);
++  if (destino_sombras && !profundidad_mini && tipo >= 4 && sesgo[0] == 0.0f && sesgo[1] == 0.0f) {
+     sesgo[0] = float(REXCVAR_GET(nfsmw_nativo_sombras_sesgo_constante)) * 1000.0f;
+     sesgo[1] = float(REXCVAR_GET(nfsmw_nativo_sombras_sesgo_pendiente)) * 0.1f;
+   }

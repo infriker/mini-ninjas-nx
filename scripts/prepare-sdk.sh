@@ -13,6 +13,8 @@ git -C sdk apply --check ../patches/runtime-logging.patch
 git -C sdk apply ../patches/runtime-logging.patch
 git -C sdk apply --check ../patches/audio-client-lifetime.patch
 git -C sdk apply ../patches/audio-client-lifetime.patch
+git -C sdk apply --check ../patches/minininjas-depth-bias.patch
+git -C sdk apply ../patches/minininjas-depth-bias.patch
 git -C sdk submodule update --init --depth 1 --jobs "${JOBS:-4}" \
   thirdparty/cli11 thirdparty/libmspack thirdparty/FFmpeg thirdparty/tomlplusplus \
   thirdparty/simde thirdparty/xxHash thirdparty/spdlog thirdparty/fmt thirdparty/utfcpp \

@@ -45,6 +45,9 @@ NFSMW-NX. Those attributions are retained in the installer notices.
   leaving unrelated render passes under their existing rules.
 - Correct the original quarter-width refraction coordinates for the full-frame
   scene, preserving the ripple calculation and environment cubemap lookup.
+- Use the game's depth bias for the main scene prepass. Applying the shadow-map
+  bias here caused the translucent trunk to fail its depth test when a tree
+  passed between the camera and the player.
 - Retain cache freshness, barriers, bounds and format checks that affect
   correctness.
 - Offer a configurable frame limit at the game's Swap command without changing
