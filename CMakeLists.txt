@@ -143,5 +143,5 @@ if(NOT MINININJAS_PGO STREQUAL "off")
     target_link_options(mini-ninjas PRIVATE ${use_flags})
   endif()
 endif()
-rexglue_switch_add_nro(mini-ninjas NAME "${nro_name}" AUTHOR "infriker" VERSION "1.0.5"
+rexglue_switch_add_nro(mini-ninjas NAME "${nro_name}" AUTHOR "infriker" VERSION "1.0.6"
   ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/icon.jpg")

@@ -9,6 +9,38 @@
 Set the clocks on the console. To change the frame limit, edit
 `minininjas.toml` beside the NRO and restart the game.
 
+## v1.0.6 gameplay profile
+
+The change from v1.0.5 is the input to GCC's profile-guided optimization
+(PGO). A dedicated recorder counted PowerPC branch executions during a
+Switch playthrough into the second level. All 97 generated code files
+contributed counters. The recorder used the original bodies of the five
+register-localized functions so GCC could count branches in those files.
+The gameplay NRO enables the localized bodies and contains no recording code.
+
+| Training profile | Functions exercised (out of 26,543) |
+|---|---:|
+| v1.0.5 | 11,326 |
+| v1.0.6 | 12,445 |
+
+The new run exercised 1,173 functions absent from the earlier run, and 54
+ran only in the earlier one. These figures measure coverage of the training
+route. For an FPS comparison, use the same save, camera route and clocks.
+
+The build used the new recording alone. GCC 15.2 rebuilt all 97 files with
+`-fprofile-use` and treated missing profiles and control-flow mismatches as
+errors. The branch counts guide code layout along frequently taken paths.
+Link-time optimization (LTO) works across the generated files, and
+`-fprofile-reorder-functions` lets GCC place frequently executed functions
+together. For recording and import instructions, see the
+[build guide](building.md#cpu-builds-and-on-console-profiling).
+
+As in v1.0.5, direct calls across files bypass weak aliases for known
+unhooked targets, register localization reduces accesses to `PPCContext`,
+and audio workers can sleep until their group completes a barrier.
+Incremental PM4 read-pointer updates return ring space to the game, and
+Partial Submit lets the GPU start a batch while the CPU records later draws.
+
 ## One full-screen scene
 
 The Xbox 360 renderer divides the main 1280×720 scene into four vertical
@@ -49,9 +81,6 @@ use more memory than the old strip buffers.
   branch-and-link calls to known, unhooked entries across translation units.
   Shared tails, indirect dispatch, coroutine and unwind boundaries retain the
   original calling convention. Link the guest functions together with GCC LTO.
-- The profile recorder captures guest branch frequency and samples native CPU
-  stacks. Profile-use builds apply the recorded frequencies and let GCC group
-  hot code. See [building.md](building.md) for recording and import.
 - Native hook `sub_82417FF0` handles large aligned fills in ordinary guest
   RAM. The CPU stack samples placed it in the audio worker. It preserves the
   original access widths, register results and short/unaligned fallback.
@@ -72,7 +101,7 @@ use more memory than the old strip buffers.
   [NFSMW frame handoff](https://github.com/StevensND/nfsmw-nx/blob/main/app/src/nfsmw_espera_fotograma.cpp).
 - The register optimization keeps PowerPC integer, floating-point, vector and
   condition registers in C++ locals across operations in five profiled game
-  routines and their direct leaf callees. The compiler can then keep live
+  routines and 28 direct leaf routines. The compiler can then keep live
   values in ARM64 registers. The pass writes back visible results at returns
   and materializes the context at calls into code outside the selected region.
   Guest stack accesses, FPSCR and coroutine save/restore keep their original
