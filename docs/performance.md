@@ -1,10 +1,13 @@
 # Performance
 
-With the frame limit disabled, gameplay runs at **40–60 FPS** on my Nintendo Switch (test profile: **CPU
-1040 MHz, GPU 460 MHz**). The result depends on the scene and camera direction.
-The port leaves clocks to the system and does not force an overclock. The
-supplied runtime configuration targets 30 FPS, with `minininjas_fps_limit = 0`
-available to disable the additional limit. Restart after editing the setting.
+| Gameplay on Nintendo Switch | CPU clock | GPU clock | `minininjas_fps_limit` |
+|---|---|---|---|
+| 25–30 FPS, depending on the scene | Stock | Stock | `30` (default) |
+| Stable 30 FPS | 1224 MHz | Stock | `30` |
+| 60 FPS target | 1785 MHz | 614 MHz | `0` (uncapped) |
+
+Set the clocks on the console. To change the frame limit, edit
+`minininjas.toml` beside the NRO and restart the game.
 
 ## One full-screen scene
 

@@ -44,10 +44,11 @@ Keep your existing save directories when updating.
 
 ## Performance
 
-With the frame limit disabled, gameplay runs at **40–60 FPS** on my Nintendo
-Switch depending on the scene (test profile: **CPU 1040 MHz, GPU 460 MHz**).
-The supplied runtime settings target **30 FPS**; set `minininjas_fps_limit = 0`
-in the runtime TOML to remove the limit. The port does not force an overclock.
+On Nintendo Switch, gameplay runs at **25–30 FPS at stock clocks**, depending
+on the scene. For a stable **30 FPS**, set the CPU to **1224 MHz** and keep
+the default 30 FPS limit. For **60 FPS**, set the CPU to **1785 MHz** and the
+GPU to **614 MHz**, then set `minininjas_fps_limit = 0` in `minininjas.toml`
+beside the NRO and restart the game.
 See [frame-limit settings](docs/installing.md#frame-limit).
 
 - Main scene rendered at **1280×720** with **hardware 4× MSAA**.
