@@ -1,4 +1,4 @@
-// Link with minininjas_native.cpp and the two original generated definitions.
+// Link the native hooks with the original generated definitions.
 #include "minininjas_pch.h"
 #include "../../src/minininjas_native.h"
 #include <array>
@@ -9,6 +9,7 @@
 
 DECLARE_REX_FUNC(sub_82417FF0);
 DECLARE_REX_FUNC(sub_82501EF0);
+bool TestWorkerBarrier();
 
 namespace {
 alignas(64) std::array<uint8_t, 0x12000> original, native;
@@ -113,7 +114,7 @@ int main() {
   if (!std::freopen("sdmc:/switch/mini-ninjas/native-test.txt", "w", stdout)) return 2;
 #endif
   minininjas::cpu::EnableNativeRamp(true);
-  const bool ok = Test();
+  const bool ok = Test() && TestWorkerBarrier();
   std::puts(ok ? "PASS: 768 vector and 768 fill cases" : "FAIL");
 #ifdef MINI_NATIVE_BENCH
   if (ok) Benchmark();

@@ -34,6 +34,10 @@ manifest = json.loads((args.generated / "perf-manifest.json").read_text())
 for name in manifest["nativeOriginals"]:
     if name not in table or "__imp__" + name not in table or table[name] == table["__imp__" + name]:
         raise SystemExit(f"Missing native override or original: {name}")
+for name in json.loads(Path(__file__).with_name("local_regs.json").read_text()):
+    entries = {table.get(symbol) for symbol in (name, "__imp__" + name, "local_regs_" + name)}
+    if name not in manifest["nativeOriginals"] or None in entries or len(entries) != 3:
+        raise SystemExit(f"Missing register dispatcher, original or localized body: {name}")
 
 service_wrappers = {
     "__wrap_" + name for name in (

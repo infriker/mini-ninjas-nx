@@ -111,6 +111,13 @@ translation-unit profiles fail the build. To look up a sampled `imagen+0x...`
 offset, pass its hexadecimal part to
 `aarch64-none-elf-addr2line -fCe build/switch-train/mini-ninjas 0x...`.
 
+The register-localization pass generates a second implementation for the
+targets in `tools/perf/local_regs.json`. Profile recording uses their original
+bodies. The additional bodies are compiled separately using the same floating
+point and aliasing settings and participate in the gameplay LTO link. To
+compare register state and memory with the original code on a Linux host, run
+`python3 tools/perf/test_local_regs.py build/generated-cpu` in the build container.
+
 To assemble the installable application files from the locally built NRO and
 the separately extracted release shader package:
 

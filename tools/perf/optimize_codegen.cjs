@@ -23,10 +23,12 @@ const callPattern=/(?<![\w])([A-Za-z_]\w*)\(ctx, base\);/g;
 const linkedCall=/^(\s*\/\/ bl 0x([0-9a-f]{8})\r?\n[ \t]+ctx\.lr = 0x[0-9a-f]{8};\r?\n[ \t]+)(sub_[0-9a-f]{8})\(ctx, base\);/gim;
 const sensitive=new Set(['sub_82402148','sub_82402628','sub_824027A8','sub_8241CA80','sub_8241CDA0','sub_82425830']);
 const unsafeEntries=new Set();
-// These two native hooks implement the supported XEX's exact routines.
+// Native hooks are keyed to the supported XEX's exact routines.
 const nativeOriginals=new Map([
   ['sub_82417FF0','8619c53824116a2c7f81448b0b79c6540c7ac3a725d9d0c067ebc0bb47d99c63'],
   ['sub_82501EF0','a5b6efbee5b401c54ea7176e682ffd86311698be01b974252d4312033f6df3de'],
+  ['sub_824F9340','c15c2517dc9d36e7258b54ca17c3b987221d81de3d50829fceeeb6435ca8066a'],
+  ...Object.entries(require('./local_regs.json')),
 ]);
 const original=new Map(), owners=new Map(), helpers=new Map();
 for(const unit of units){const s=fs.readFileSync(path.join(input,unit),'utf8');original.set(unit,s);
@@ -66,7 +68,7 @@ function unsafeBody(name,body){
   return sensitive.has(name)||/\b(?:MINININJAS_CAPTURE|setjmp|longjmp|(?:__imp__)?(?:RtlUnwind|RtlCaptureContext|RtlRaiseException|KeBugCheck|KeBugCheckEx))\b|coroutines::|sub_8241CA80|sub_8241CDA0/.test(body);
 }
 // Stack access always stays volatile: a guest coroutine may copy or observe
-// an older frame through transitive calls. No stack or register rewrite here.
+// an older frame through transitive calls. Keep the original bodies for A/B.
 const helperHeader=['// Derived from GPL-3.0-or-later Dante/Gears2 generated-helper optimization.','// See tools/perf/NOTICE. These copies preserve the original full PPCContext ABI.','#pragma once',''];
 // Keep capture/restore frames and their entry points intact across the LTO link.
 helperHeader.push('#if defined(__GNUC__) && !defined(__clang__)');

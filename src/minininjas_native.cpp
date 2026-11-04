@@ -1,6 +1,8 @@
 #include "minininjas_pch.h"
 #include "minininjas_native.h"
 
+bool minininjas::cpu::local_registers_enabled = true;
+
 REX_EXTERN(__imp__sub_82501EF0);
 REX_EXTERN(__imp__sub_82417FF0);
 

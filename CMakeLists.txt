@@ -17,9 +17,18 @@ if(NOT EXISTS "${MINININJAS_GENERATED_DIR}/minininjas_init.h")
 endif()
 if(EXISTS "${MINININJAS_GENERATED_DIR}/minininjas_perf_helpers.h")
   set(manifest "${MINININJAS_GENERATED_DIR}/perf-manifest.json")
-  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${manifest}")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${manifest}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/perf/local_regs.json")
   file(READ "${manifest}" cpu_manifest)
-  foreach(hook sub_82417FF0 sub_82501EF0)
+  file(READ "${CMAKE_CURRENT_SOURCE_DIR}/tools/perf/local_regs.json" local_reg_targets)
+  string(JSON last_target LENGTH "${local_reg_targets}")
+  math(EXPR last_target "${last_target} - 1")
+  set(required_hooks sub_82417FF0 sub_82501EF0 sub_824F9340)
+  foreach(i RANGE 0 ${last_target})
+    string(JSON hook MEMBER "${local_reg_targets}" ${i})
+    list(APPEND required_hooks "${hook}")
+  endforeach()
+  foreach(hook IN LISTS required_hooks)
     string(JSON signature ERROR_VARIABLE missing GET "${cpu_manifest}" nativeOriginals "${hook}")
     if(missing)
       message(FATAL_ERROR "Regenerate the optimized sources for native hook ${hook}. See docs/building.md")
@@ -49,6 +58,15 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${MINININJAS_GEN
 set(guest_tables "${MINININJAS_GENERATED_DIR}/minininjas_init.cpp"
                 "${MINININJAS_GENERATED_DIR}/minininjas_register.cpp")
 list(REMOVE_ITEM GENERATED_SOURCES ${guest_tables})
+find_program(MINININJAS_NODE NAMES node nodejs REQUIRED NO_CMAKE_FIND_ROOT_PATH)
+set(local_reg_source "${CMAKE_CURRENT_BINARY_DIR}/minininjas_local_regs.cpp")
+set(local_reg_dispatch "${CMAKE_CURRENT_BINARY_DIR}/minininjas_local_dispatch.cpp")
+set(local_reg_tools "${CMAKE_CURRENT_SOURCE_DIR}/tools/perf")
+add_custom_command(OUTPUT "${local_reg_source}" "${local_reg_dispatch}"
+  COMMAND "${MINININJAS_NODE}" "${local_reg_tools}/localize_regs.cjs" "${MINININJAS_GENERATED_DIR}"
+    "${local_reg_source}" "${local_reg_dispatch}"
+  DEPENDS "${local_reg_tools}/localize_regs.cjs" "${local_reg_tools}/local_regs.json" ${GENERATED_SOURCES}
+  VERBATIM)
 add_library(minininjas_recomp OBJECT ${GENERATED_SOURCES})
 target_include_directories(minininjas_recomp PRIVATE "${MINININJAS_GENERATED_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(minininjas_recomp PRIVATE rex::runtime)
@@ -64,6 +82,9 @@ add_executable(mini-ninjas
   src/main.cpp
   src/minininjas_coroutines.cpp
   src/minininjas_native.cpp
+  src/minininjas_worker_barrier.cpp
+  "${local_reg_source}"
+  "${local_reg_dispatch}"
   src/switch_heap.cpp
   src/minininjas_gpu.cpp
   src/minininjas_shaders.cpp
@@ -90,6 +111,7 @@ if(MINININJAS_LTO AND NOT MINININJAS_PGO STREQUAL "generate")
     message(FATAL_ERROR "MINININJAS_LTO_JOBS must be a positive integer")
   endif()
   target_compile_options(minininjas_recomp PRIVATE -flto -fno-fat-lto-objects)
+  set_property(SOURCE "${local_reg_source}" APPEND PROPERTY COMPILE_OPTIONS -flto -fno-fat-lto-objects)
   target_link_options(mini-ninjas PRIVATE "-flto=${MINININJAS_LTO_JOBS}" -flto-partition=balanced
     -fno-strict-aliasing -ffp-contract=off)
 endif()
@@ -121,5 +143,5 @@ if(NOT MINININJAS_PGO STREQUAL "off")
     target_link_options(mini-ninjas PRIVATE ${use_flags})
   endif()
 endif()
-rexglue_switch_add_nro(mini-ninjas NAME "${nro_name}" AUTHOR "infriker" VERSION "1.0.4-exp.2"
+rexglue_switch_add_nro(mini-ninjas NAME "${nro_name}" AUTHOR "infriker" VERSION "1.0.4-regs.1"
   ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/icon.jpg")

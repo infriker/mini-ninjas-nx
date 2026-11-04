@@ -21,6 +21,8 @@
 
 REXCVAR_DECLARE(bool, input_service_shortcuts);
 REXCVAR_DECLARE(bool, minininjas_native_ramp);
+REXCVAR_DECLARE(bool, minininjas_worker_wait);
+REXCVAR_DECLARE(bool, minininjas_local_regs);
 REXCVAR_DECLARE(int32_t, nfsmw_io_resumen_s);
 REXCVAR_DECLARE(int32_t, nfsmw_io_aviso_ms);
 
@@ -50,6 +52,13 @@ class MiniNinjasApp : public rex::ReXApp {
 
   void OnPreSetup(rex::RuntimeConfig& config) override {
     minininjas::cpu::EnableNativeRamp(REXCVAR_GET(minininjas_native_ramp));
+    minininjas::cpu::EnableWorkerWait(REXCVAR_GET(minininjas_worker_wait));
+#if MINININJAS_PGO_RECORD
+    // GCC's recording map describes the original translation units.
+    minininjas::cpu::local_registers_enabled = false;
+#else
+    minininjas::cpu::local_registers_enabled = REXCVAR_GET(minininjas_local_regs);
+#endif
     REXCVAR_SET(input_service_shortcuts, false);
     REXCVAR_SET(nfsmw_io_resumen_s, 0);
     REXCVAR_SET(nfsmw_io_aviso_ms, 0);
