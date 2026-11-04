@@ -1,0 +1,29 @@
+diff --git a/src/ui/switch_perf.cpp b/src/ui/switch_perf.cpp
+--- a/src/ui/switch_perf.cpp
++++ b/src/ui/switch_perf.cpp
+@@ -56,6 +56,7 @@
+ extern "C" {
+ /* Applications may disable service profiling before static initialization. */
+ bool RexSwitchProfilerEnabled(void) __attribute__((weak));
++bool RexSwitchStackSamplingEnabled(void) __attribute__((weak));
+ void _start(void);
+ /* rexglue log folder, ending in '/' (switch_crash_hooks.c). */
+ const char* RexSwitchLogDir(void);
+@@ -805,7 +806,7 @@ void ProfilerMain(void*) {
+ 
+   // Invasive sampling is only enabled explicitly, for diagnostics.
+   // The normal mode keeps FPS, CPU and counters, without stopping the game.
+-  bool sample_stacks = false;
++  bool sample_stacks = RexSwitchStackSamplingEnabled && RexSwitchStackSamplingEnabled();
+   if (FILE* flag = std::fopen(StackFlagPath().c_str(), "r")) {
+     sample_stacks = true;
+     std::fclose(flag);
+@@ -862,7 +863,7 @@ void ProfilerMain(void*) {
+         if (R_SUCCEEDED(svcQueryMemory(&smi, &spi, ctx.sp)) && (smi.perm & Perm_R)) {
+           const u64 lo = smi.addr, hi = smi.addr + smi.size;
+           u64 fp = ctx.fp;
+-          for (size_t k = 0; k < kFrames && fp >= lo && fp + 16 <= hi && (fp & 7) == 0; ++k) {
++          for (size_t k = 0; k < kFrames && fp >= lo && fp < hi && hi - fp >= 16 && (fp & 7) == 0; ++k) {
+             out.frames[k] = reinterpret_cast<const u64*>(fp)[1];
+             const u64 next = reinterpret_cast<const u64*>(fp)[0];
+             if (next <= fp) {

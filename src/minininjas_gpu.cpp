@@ -27,6 +27,9 @@
 #include "minininjas_gpu.h"
 #include "minininjas_gpu_hotpath.h"
 #include "minininjas_frame_limiter.h"
+#if MINININJAS_PGO_RECORD
+#include "minininjas_pgo.h"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -102,6 +105,7 @@ REXCVAR_DECLARE(bool, nfsmw_dk_borrado_color_aplazado);
 REXCVAR_DECLARE(bool, nfsmw_dk_borrado_z_aplazado);
 REXCVAR_DECLARE(bool, nfsmw_dk_geometria_muestreo);
 REXCVAR_DECLARE(bool, deko_perfil_cpu_dibujos);
+REXCVAR_DECLARE(int32_t, deko_partial_submit_draws);
 REXCVAR_DECLARE(int32_t, deko_msaa_minimo_pitch_muestras);
 REXCVAR_DECLARE(bool, deko_minininjas_full_frame);
 REXCVAR_DECLARE(int32_t, deko_minininjas_full_frame_depth_info);
@@ -242,6 +246,9 @@ class RingGraphicsSystem final : public rex::system::IGraphicsSystem {
     REXCVAR_SET(nfsmw_dk_borrado_z_aplazado, false);
     REXCVAR_SET(nfsmw_dk_geometria_muestreo, false);
     REXCVAR_SET(deko_perfil_cpu_dibujos, false);
+    if (rex::cvar::GetFlagSource("deko_partial_submit_draws") == rex::cvar::Source::kDefault) {
+      REXCVAR_SET(deko_partial_submit_draws, 128);
+    }
     REXCVAR_SET(deko_msaa_minimo_pitch_muestras, 640);
     REXCVAR_SET(deko_minininjas_full_frame, true);
     REXCVAR_SET(deko_minininjas_full_frame_depth_info, 0xB40);
@@ -274,15 +281,20 @@ class RingGraphicsSystem final : public rex::system::IGraphicsSystem {
   }
 
   void InitializeRingBuffer(uint32_t ptr, uint32_t size_log2) override {
-    // As in CommandProcessor::InitializeRingBuffer: (1 << (size_log2 + 3)) bytes.
-    ring_words_.store(uint32_t(1) << (size_log2 + 1), std::memory_order_release);
-    ring_base_.store(ptr, std::memory_order_release);
-    ring_generation_.fetch_add(1, std::memory_order_acq_rel);
+    {
+      std::lock_guard lock(ring_mutex_);
+      ring_words_ = size_log2 < 31 ? 1u << (size_log2 + 1) : 0;
+      ring_base_ = ptr;
+      if (ring_generation_) write_pointer_ = 0;
+      ++ring_generation_;
+    }
+    ring_cv_.notify_one();
   }
 
   void EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_size_log2) override {
-    (void)block_size_log2;
-    read_pointer_writeback_.store(ptr, std::memory_order_release);
+    std::lock_guard lock(ring_mutex_);
+    read_pointer_writeback_ = ptr;
+    read_pointer_step_ = ptr ? hotpath::ReadPointerStep(block_size_log2) : 0;
   }
 
   void Shutdown() override {
@@ -364,11 +376,9 @@ class RingGraphicsSystem final : public rex::system::IGraphicsSystem {
       registers_[r] = value;  // no side effects through MMIO (graphics_system.cpp)
     }
     if (r == kRegCpRbWptr) {
-      write_pointer_.store(value, std::memory_order_release);
-      // Taking the lock for an instant avoids losing the wakeup if the ring thread is between checking
-      // and going to sleep.
       {
         std::lock_guard<std::mutex> lock(ring_mutex_);
+        write_pointer_ = value;
       }
       ring_cv_.notify_one();
     }
@@ -493,29 +503,29 @@ class RingGraphicsSystem final : public rex::system::IGraphicsSystem {
   int RingLoop() {
     uint32_t read = 0;
     uint32_t generation = 0;
+    uint32_t last_write = 0;
     while (active_.load(std::memory_order_acquire)) {
+      uint32_t base, words, step;
       {
         std::unique_lock<std::mutex> lock(ring_mutex_);
-        ring_cv_.wait_for(lock, std::chrono::milliseconds(4), [&] {
-          return !active_.load(std::memory_order_acquire) ||
-                 write_pointer_.load(std::memory_order_acquire) != read ||
-                 ring_generation_.load(std::memory_order_acquire) != generation;
+        ring_cv_.wait(lock, [&] {
+          return !active_.load(std::memory_order_acquire) || write_pointer_ != last_write ||
+                 ring_generation_ != generation;
         });
+        if (!active_.load(std::memory_order_acquire)) break;
+        if (ring_generation_ != generation) {
+          generation = ring_generation_;
+          read = 0;
+        }
+        base = ring_base_;
+        words = ring_words_;
+        step = read_pointer_step_;
+        last_write = write_pointer_;
       }
-      if (!active_.load(std::memory_order_acquire)) {
-        break;
-      }
-      const uint32_t gen = ring_generation_.load(std::memory_order_acquire);
-      if (gen != generation) {
-        generation = gen;
-        read = 0;  // InitializeRingBuffer leaves the read pointer at zero
-      }
-      const uint32_t base = ring_base_.load(std::memory_order_acquire);
-      const uint32_t words = ring_words_.load(std::memory_order_acquire);
       if (!base || !words) {
         continue;
       }
-      const uint32_t written = write_pointer_.load(std::memory_order_acquire) & (words - 1);
+      const uint32_t written = last_write & (words - 1);
       if (written == read) {
         continue;
       }
@@ -524,25 +534,25 @@ class RingGraphicsSystem final : public rex::system::IGraphicsSystem {
       reader.mask = words - 1;
       reader.pos = read;
       reader.end = written;
-      while (reader.Pending()) {
-        if (!Packet(reader, 0)) {
-          break;  // partial packet: the rest comes with the next CP_RB_WPTR
-        }
-      }
+      hotpath::DrainPrimary(reader, step, [this](Reader& r) { return Packet(r, 0); },
+                            [this, generation](uint32_t pos) { return PublishReadPointer(generation, pos); });
       read = reader.pos;
-#if MINININJAS_DEKO3D
-      if (destinos_) {
-        destinos_->EsperarSubidas();
-      }
-#endif
-      const uint32_t writeback = read_pointer_writeback_.load(std::memory_order_acquire);
-      if (writeback) {
-        rex::memory::store_and_swap<uint32_t>(memory_->TranslatePhysical(writeback), read);
-        // Not a GuestSeesGpuProgress: it is written after every batch of the ring, and each one made the renderer's
-        // geometry store check every range again (an epoch). Ring memory comes back only after a wrap, frames later.
-      }
     }
     return 0;
+  }
+
+  bool PublishReadPointer(uint32_t generation, uint32_t read) {
+#if MINININJAS_DEKO3D
+    if (destinos_) destinos_->EsperarSubidas();
+#endif
+    std::lock_guard lock(ring_mutex_);
+    if (generation != ring_generation_) return false;
+    if (read_pointer_writeback_) {
+      // Finish reads of the packet and its uploads before the producer can reuse it.
+      std::atomic_thread_fence(std::memory_order_release);
+      rex::memory::store_and_swap<uint32_t>(memory_->TranslatePhysical(read_pointer_writeback_), read);
+    }
+    return true;
   }
 
   // --- PM4 packets ------------------------------------------------------------
@@ -617,6 +627,9 @@ class RingGraphicsSystem final : public rex::system::IGraphicsSystem {
         // VdSwap writes "SWAP", the frontbuffer's physical address and its size. The renderer presents whatever is
         // resolved (clears and, once the ring decoder feeds draws, the frame). Handheld 1280x720.
         if (!frame_limiter_.Wait()) break;
+#if MINININJAS_PGO_RECORD
+        minininjas::pgo::OnFrame();
+#endif
         counter_.fetch_add(1, std::memory_order_relaxed);
         if (EnsureRenderer()) {
           // VdSwap describes the frontbuffer in fetch constant 0; an empty TexturaSwap finds nothing (black).
@@ -994,11 +1007,9 @@ class RingGraphicsSystem final : public rex::system::IGraphicsSystem {
 
   std::atomic<uint32_t> callback_{0};
   std::atomic<uint32_t> callback_data_{0};
-  std::atomic<uint32_t> ring_base_{0};
-  std::atomic<uint32_t> ring_words_{0};
-  std::atomic<uint32_t> ring_generation_{0};
-  std::atomic<uint32_t> write_pointer_{0};
-  std::atomic<uint32_t> read_pointer_writeback_{0};
+  // Protected by ring_mutex_ so a stale batch cannot publish into a new ring.
+  uint32_t ring_base_ = 0, ring_words_ = 0, ring_generation_ = 0;
+  uint32_t write_pointer_ = 0, read_pointer_writeback_ = 0, read_pointer_step_ = 0;
   std::atomic<uint32_t> counter_{0};  // vblanks + swaps, for EVENT_WRITE_SHD
   std::mutex ring_mutex_;
   std::condition_variable ring_cv_;

@@ -1,0 +1,194 @@
+diff --git a/include/rex/ui/deko3d/nucleo.h b/include/rex/ui/deko3d/nucleo.h
+--- a/include/rex/ui/deko3d/nucleo.h
++++ b/include/rex/ui/deko3d/nucleo.h
+@@ -158,6 +158,12 @@ class Nucleo {
+   // descriptor writes go here, so the draws recorded before and after them in comandos() all see them (the
+   // Vulkan path's upload command buffer). Only with ConfigNucleo::kb_previos.
+   DkCmdBuf ComandosPrevios() {
++    if (previos_tras_parcial_) {
++      // A texture may be uploaded in place. Finish the preceding batch's reads
++      // before the copy engine writes it. Only pay this barrier for a real pre-list.
++      dkCmdBufBarrier(previos_, DkBarrier_Full, 0);
++      previos_tras_parcial_ = false;
++    }
+     previos_usados_ = true;
+     return previos_;
+   }
+@@ -253,6 +259,7 @@ class Nucleo {
+   DkCmdBuf comandos_ = nullptr;
+   DkCmdBuf previos_ = nullptr;
+   bool previos_usados_ = false;
++  bool previos_tras_parcial_ = false;
+   uint64_t ns_esperando_valla_ = 0;
+   DkMemBlock memoria_previos_ = nullptr;
+   DkMemBlock subida_ = nullptr, memoria_comandos_ = nullptr, codigo_ = nullptr, descriptores_ = nullptr,
+diff --git a/src/ui/deko3d/nucleo.cpp b/src/ui/deko3d/nucleo.cpp
+--- a/src/ui/deko3d/nucleo.cpp
++++ b/src/ui/deko3d/nucleo.cpp
+@@ -329,6 +329,7 @@ void Nucleo::EmpezarTrabajo(uint64_t trabajo) {
+     r.previos.desborde_usado = 0;
+   }
+   previos_usados_ = false;
++  previos_tras_parcial_ = false;
+   comandos_este_trabajo_ = kTrozoComandos;
+   abierto_ = true;
+ }
+@@ -402,6 +403,7 @@ void Nucleo::EnviarParcial() {
+   } else {
+     disp_->Enviar(dkCmdBufFinishList(comandos_), "un envio parcial");
+   }
++  previos_tras_parcial_ = previos_ != nullptr;
+ }
+ 
+ bool Nucleo::TrabajoTerminado(uint64_t trabajo) {
+diff --git a/include/rex/x360/deko/render.h b/include/rex/x360/deko/render.h
+--- a/include/rex/x360/deko/render.h
++++ b/include/rex/x360/deko/render.h
+@@ -220,6 +220,9 @@ class RenderDk final : public DestinosNativos {
+   // Recorded before anything of a frame's first slot: what the previous frame's output sampled is read, and the
+   // tiled cache stays off (deko3d never writes it: HowToDeko3d.md, section 6, item 7).
+   void InicioDeTrabajo();
++  void RestablecerListaDeDibujos();
++  void TrasDibujoParaEnvio();
++  void InformarEnviosParciales(uint64_t ahora);
+   // A Full barrier: transfers (copies, blits) are ordered against the 3D engine (HowToDeko3d.md, section 5.6).
+   void BarreraTransferencia();
+   // The barriers around copy engine transfers (copies, read-backs), only where there is a hazard: before a transfer
+@@ -585,6 +588,14 @@ class RenderDk final : public DestinosNativos {
+   // Work slots and frames
+   uint64_t trabajo_ = 0;
+   uint64_t fotograma_ = 1;
++  const uint32_t intervalo_envio_parcial_;
++  const bool medir_envios_parciales_;
++  uint32_t dibujos_sin_envio_ = 0;
++  bool sondeo_hecho_ = false;
++  struct VentanaEnvios {
++    uint64_t inicio = 0, dibujos = 0, trabajos_gpu = 0, hueco_gpu_ns = 0;
++    uint32_t fotogramas = 0, lentos = 0, parciales = 0, sondeos = 0, previos_listos = 0;
++  } ventana_envios_;
+   // g_volcar_dibujos_captura: the capture whose next frame is being listed, and its last draws.
+   int32_t volcando_captura_ = 0;
+   std::deque<std::string> volcado_dibujos_;
+diff --git a/src/x360/deko/destinos.cpp b/src/x360/deko/destinos.cpp
+--- a/src/x360/deko/destinos.cpp
++++ b/src/x360/deko/destinos.cpp
+@@ -42,6 +42,12 @@ REXCVAR_DEFINE_BOOL(deko_edram_baldosas, false, "deko3d",
+ REXCVAR_DEFINE_BOOL(deko_minininjas_full_frame, false, "deko3d",
+                     "Mini Ninjas single-tile full-frame scene; requires a matching guest patch")
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_INT32(deko_partial_submit_draws, 0, "deko3d",
++                     "Submit after this many emitted guest draws in one work slot. 0 disables partial submits.")
++    .range(0, 65536).lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_BOOL(deko_partial_submit_stats, false, "deko3d",
++                    "Log frame pacing, partial submits, game work gaps and non-blocking fence probes every 10 seconds.")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ REXCVAR_DEFINE_INT32(deko_minininjas_full_frame_depth_info, 0x2D0, "deko3d",
+                      "Expected complete RB_DEPTH_INFO for the Mini Ninjas full-frame scene")
+     .range(0, 0x7FFFFFFF)
+@@ -551,6 +557,8 @@ constexpr uint32_t kBytesUboRampa = 4 * 16;  // mezcla, efectos, desplazamiento,
+ 
+ RenderDk::RenderDk(deko::ProveedorDeko3d& proveedor, rex::memory::Memory* memoria, rex::x360::RenderHooks& hooks)
+     : proveedor_(proveedor), compilador_(proveedor.compilador()), memoria_(memoria), hooks_(hooks),
++      intervalo_envio_parcial_(uint32_t(REXCVAR_GET(deko_partial_submit_draws))),
++      medir_envios_parciales_(REXCVAR_GET(deko_partial_submit_stats)),
+       tiempos_cpu_dibujos_(REXCVAR_GET(deko_perfil_cpu_dibujos)) {
+   deko::ConfigNucleo config;
+   config.ranuras = kRanuras;
+@@ -704,6 +712,8 @@ void RenderDk::AsegurarTrabajo() {
+ }
+ 
+ void RenderDk::InicioDeTrabajo() {
++  dibujos_sin_envio_ = 0;
++  sondeo_hecho_ = false;
+   DkCmdBuf cmd = nucleo_.comandos();
+   marcas_[trabajo_ % kRanuras].clear();
+   MarcarGpu(kGpuOtros);  // the work's start
+@@ -716,11 +726,58 @@ void RenderDk::InicioDeTrabajo() {
+   // is done before this one's draws; the caches forget what the CPU rewrote in this slot's memory.
+   dkCmdBufBarrier(cmd, DkBarrier_Fragments,
+                   DkInvalidateFlags_Image | DkInvalidateFlags_Shader | DkInvalidateFlags_Descriptors);
+-  dkCmdBufTiledCacheOp(cmd, DkTiledCacheOp_Disable);
++  RestablecerListaDeDibujos();
++}
++
++void RenderDk::RestablecerListaDeDibujos() {
++  dkCmdBufTiledCacheOp(nucleo_.comandos(), DkTiledCacheOp_Disable);
+   nucleo_.BindDescriptores();
+   OlvidarEstado();
+ }
+ 
++void RenderDk::TrasDibujoParaEnvio() {
++  ++dibujos_sin_envio_;
++  // Once per work, before its first split. A completed previous game fence
++  // means this chunk could already have fed the GPU. Never wait on the CPU.
++  if (medir_envios_parciales_ && !sondeo_hecho_ && trabajo_ > 1 &&
++      dibujos_sin_envio_ == (intervalo_envio_parcial_ ? std::min(128u, intervalo_envio_parcial_) : 128u)) {
++    ++ventana_envios_.sondeos;
++    ventana_envios_.previos_listos += nucleo_.TrabajoTerminado(trabajo_ - 1);
++    sondeo_hecho_ = true;
++  }
++  if (!intervalo_envio_parcial_ || dibujos_sin_envio_ < intervalo_envio_parcial_ || cielo_pendiente_) return;
++
++  // Retain the same work, upload storage, GPU timestamps and eventual slot fence.
++  // The MSAA companions retain their pixels and pending clears keep their ordering.
++  TerminarPase();
++  nucleo_.EnviarParcial();
++  // The presenter can use the shared queue between these lists. Restart at 1x;
++  // EmpezarPase rebinds the guest targets and selects their actual sample mode.
++  DkMultisampleState una;
++  dkMultisampleStateDefaults(&una);
++  dkCmdBufBindMultisampleState(nucleo_.comandos(), &una);
++  RestablecerListaDeDibujos();
++  dibujos_sin_envio_ = 0;
++  if (medir_envios_parciales_) ++ventana_envios_.parciales;
++}
++
++void RenderDk::InformarEnviosParciales(uint64_t ahora) {
++  auto& v = ventana_envios_;
++  const uint64_t hueco = gpu_categorias_ns_[kGpuHuecoEntreTrabajos];
++  if (v.inicio) {
++    ++v.fotogramas;
++    if (ahora - ultimo_swap_ns_ > 33'333'333) ++v.lentos;
++    if (ahora - v.inicio < 10'000'000'000ull) return;
++    const uint64_t trabajos = gpu_trabajos_ - v.trabajos_gpu;
++    REXLOG_WARN("[partial-submit] interval={} frames={} fps={:.1f} over33ms={} draws/frame={:.1f} "
++                "partials={} previous_game_fence_ready={}/{} game_gap_ms/work={:.2f} measured_works={}",
++                intervalo_envio_parcial_, v.fotogramas, v.fotogramas * 1e9 / double(ahora - v.inicio),
++                v.lentos, double(dibujados_ - v.dibujos) / v.fotogramas, v.parciales, v.previos_listos,
++                v.sondeos, trabajos ? double(hueco - v.hueco_gpu_ns) / (1e6 * trabajos) : 0.0, trabajos);
++  }
++  v = {.inicio = ahora, .dibujos = dibujados_, .trabajos_gpu = gpu_trabajos_, .hueco_gpu_ns = hueco};
++}
++
+ void RenderDk::CerrarTrabajo() {
+   if (!nucleo_.TrabajoAbierto()) {
+     return;
+@@ -3009,6 +3066,7 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
+   dibujados_al_swap_ = dibujados_;
+   RexSwitchPerfCount(0);  // the profiler's "juego N fps"
+   const uint64_t ahora = deko::AhoraNs();
++  if (medir_envios_parciales_) InformarEnviosParciales(ahora);
+   if (ultimo_swap_ns_) {
+     const double ms = double(ahora - ultimo_swap_ns_) / 1e6;
+     const uint32_t cubeta = ms < 15.0    ? 0
+diff --git a/src/x360/deko/dibujos.cpp b/src/x360/deko/dibujos.cpp
+--- a/src/x360/deko/dibujos.cpp
++++ b/src/x360/deko/dibujos.cpp
+@@ -2858,6 +2858,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+     }
+     ++dibujos_en_pase_;
+   }
++  const uint64_t trabajo_del_dibujo = trabajo_;
+   // Halo 3's stencil, drawn as the red byte of 8_8_8_8 colour at the depth buffer's EDRAM base (an 8x8 dither pattern
+   // per tile): carried into the depth image's stencil (RestaurarEstencil), as the console reads that memory as depth.
+   if (claves[0] && !claves[1] && !claves[2] && !claves[3] && (mascaras & 0xF) == 0x1 &&
+@@ -2873,6 +2874,9 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+     }
+   }
+   ++dibujados_;
++  if ((intervalo_envio_parcial_ || medir_envios_parciales_) && !es_cielo && trabajo_ == trabajo_del_dibujo) {
++    TrasDibujoParaEnvio();
++  }
+   cortar_etapa(5);
+   if (tiempos_cpu_dibujos_) {
+     ns_grabando_ += deko::AhoraNs() - inicio_ns - (nucleo_.NsEsperandoValla() - espera_inicio_ns);

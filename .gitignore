@@ -12,6 +12,8 @@
 /userdata/
 /cache/
 *.nro
+*.pgo
+*.gcda
 *.nso
 *.nacp
 *.elf

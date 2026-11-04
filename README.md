@@ -12,6 +12,15 @@ copy. The original game executable, models, textures, levels, audio and movies
 are not included. The release contains the port executable and the shader
 program package needed by its renderer; see [distribution contents](docs/installing.md#distribution-contents).
 
+## Experimental performance build
+
+The [v1.0.4-exp.1 prerelease](https://github.com/infriker/mini-ninjas-nx/releases/tag/v1.0.4-exp.1)
+is an NRO-only update for an existing v1.0.3 installation. Replace
+`sdmc:/switch/mini-ninjas/mini-ninjas.nro`. It uses a gameplay profile recorded
+on Switch and sends GPU work every 128 guest draws by default. The gameplay NRO
+does not collect profiling data. See [performance](docs/performance.md) for the
+CPU changes and the adjustable draw interval.
+
 ## Install
 
 1. Open the **[Mini Ninjas NX installer](https://infriker.github.io/mini-ninjas-nx/)**.

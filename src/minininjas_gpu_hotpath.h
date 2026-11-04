@@ -18,6 +18,25 @@ struct Reader {
   void Skip(uint32_t words) { pos = mask ? ((pos + words) & mask) : (pos + words); }
 };
 
+// CP_RB_CNTL's block setting uses the same byte-to-dword conversion as ReXGlue.
+constexpr uint32_t ReadPointerStep(uint32_t block_log2) {
+  if (block_log2 < 2 || block_log2 >= 32) return 256;
+  const uint32_t words = 1u << (block_log2 - 2);
+  return words < 32 ? 32 : words;
+}
+
+template <typename Execute, typename Publish>
+inline void DrainPrimary(Reader& reader, uint32_t step, Execute&& execute, Publish&& publish) {
+  uint32_t published = reader.pos;
+  while (reader.Pending() && execute(reader)) {
+    if (step && reader.pos != reader.end && ((reader.pos - published) & reader.mask) >= step) {
+      if (!publish(reader.pos)) return;  // the ring was reinitialized
+      published = reader.pos;
+    }
+  }
+  publish(reader.pos);  // includes a short final batch or the start of a partial packet
+}
+
 struct Generations {
   uint64_t& vs;
   uint64_t& ps;
