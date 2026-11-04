@@ -2,3 +2,13 @@
 # Target 30 FPS; 0 disables the additional frame limit.
 # Restart the game after changing this value.
 minininjas_fps_limit = 30
+
+# Send recorded GPU work every N guest draws. Restart after editing.
+# Use 0 for the baseline or compare 128, 256 and 512 on the same route.
+deko_partial_submit_draws = 128
+
+# Let audio workers sleep while waiting for the rest of their group.
+minininjas_worker_wait = true
+
+# Keep guest registers in host registers in frequently executed routines.
+minininjas_local_regs = true

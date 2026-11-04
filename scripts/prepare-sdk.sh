@@ -15,6 +15,10 @@ git -C sdk apply --check ../patches/audio-client-lifetime.patch
 git -C sdk apply ../patches/audio-client-lifetime.patch
 git -C sdk apply --check ../patches/minininjas-depth-bias.patch
 git -C sdk apply ../patches/minininjas-depth-bias.patch
+git -C sdk apply --check ../patches/stack-sampler.patch
+git -C sdk apply ../patches/stack-sampler.patch
+git -C sdk apply --check ../patches/partial-submit.patch
+git -C sdk apply ../patches/partial-submit.patch
 git -C sdk apply --check ../patches/gameplay-no-profiler.patch
 git -C sdk apply ../patches/gameplay-no-profiler.patch
 git -C sdk apply --check ../patches/audio-playback.patch

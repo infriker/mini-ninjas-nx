@@ -38,11 +38,18 @@ provide enough memory. The Windows PC version is not supported.
     ...
 ```
 
-For a manual installation or an update, see [installation](docs/installing.md)
-and the [latest release](https://github.com/infriker/mini-ninjas-nx/releases/latest).
-Keep your existing save directories when updating.
+To update an existing v1.0.3 or v1.0.4 installation, replace
+`sdmc:/switch/mini-ninjas/mini-ninjas.nro` with the NRO from the
+[latest release](https://github.com/infriker/mini-ninjas-nx/releases/latest).
+For manual installation and save locations, see [installation](docs/installing.md).
 
 ## Performance
+
+The v1.0.5 release uses a gameplay profile recorded on Switch. Audio workers
+can sleep while waiting for each other, and frequently executed game routines
+keep PowerPC register values in host registers. Both changes are enabled by
+default. The renderer submits work to the GPU every 128 guest draws by default.
+See [performance settings](docs/performance.md) for the individual controls.
 
 On Nintendo Switch, gameplay runs at **25–30 FPS at stock clocks**, depending
 on the scene. For a stable **30 FPS**, set the CPU to **1224 MHz** and keep

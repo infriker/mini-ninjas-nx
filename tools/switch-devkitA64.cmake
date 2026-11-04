@@ -79,9 +79,25 @@ if(NOT EXISTS "${_SWITCH_SPECS_SOURCE}")
     message(FATAL_ERROR "libnx linker specs not found: ${_SWITCH_SPECS_SOURCE}")
 endif()
 file(READ "${_SWITCH_SPECS_SOURCE}" _SWITCH_SPECS_CONTENT)
+set(_SWITCH_LINKER_SCRIPT "${DEVKITPRO}/libnx/switch.ld")
+if(MINININJAS_PGO STREQUAL "generate")
+    # elf2nro uses libnx's program headers. Keep the profile pointer table in
+    # its existing writable segment, including relocation at load time.
+    file(READ "${_SWITCH_LINKER_SCRIPT}" _SWITCH_BASE_LAYOUT)
+    set(_SWITCH_DATA_INPUT "*(.data .data.* .gnu.linkonce.d.*)")
+    string(FIND "${_SWITCH_BASE_LAYOUT}" "${_SWITCH_DATA_INPUT}" _SWITCH_DATA_OFFSET)
+    if(_SWITCH_DATA_OFFSET EQUAL -1)
+        message(FATAL_ERROR "Cannot locate the writable data section in libnx switch.ld")
+    endif()
+    string(REPLACE "${_SWITCH_DATA_INPUT}"
+        "${_SWITCH_DATA_INPUT}\n        INCLUDE \"${CMAKE_CURRENT_LIST_DIR}/perf/gcov-info.ld\""
+        _SWITCH_PGO_LAYOUT "${_SWITCH_BASE_LAYOUT}")
+    set(_SWITCH_LINKER_SCRIPT "${CMAKE_BINARY_DIR}/switch-pgo.ld")
+    file(CONFIGURE OUTPUT "${_SWITCH_LINKER_SCRIPT}" CONTENT "${_SWITCH_PGO_LAYOUT}" @ONLY)
+endif()
 string(REPLACE
     "%:getenv(DEVKITPRO /libnx/switch.ld)"
-    "${DEVKITPRO}/libnx/switch.ld"
+    "${_SWITCH_LINKER_SCRIPT}"
     _SWITCH_SPECS_CONTENT
     "${_SWITCH_SPECS_CONTENT}")
 set(_SWITCH_SPECS_CONFIGURED "${CMAKE_BINARY_DIR}/switch.specs")

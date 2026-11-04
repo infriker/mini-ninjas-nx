@@ -1,7 +1,11 @@
 Generated-code transformations are inspired by the CPU passes in
 VasilkovND/dantes-inferno-nx, which credits gears2-nx:
 https://github.com/VasilkovND/dantes-inferno-nx/tree/main/dante/tools
-Specifically patch_inline_calls.py. The optional stack pass is not used.
+The inline helpers follow patch_inline_calls.py. localize_regs.cjs uses the
+register-localization method described in dante/CPU_OPTIMIZATION.md and
+gow2/CPU_OPTIMIZATION.md. Its dataflow, synchronization at forward joins and
+startup dispatch are implemented for Mini Ninjas. The optional guest-stack
+memory pass is not used.
 The upstream project is licensed GPL-3.0-or-later; the accompanying LICENSE
 preserves the license text. The independently adapted tools and generated
 helper output here are distributed under the same GPL-3.0-or-later terms.

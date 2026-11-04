@@ -64,6 +64,60 @@ scene mode enabled. The output is `build/switch/mini-ninjas.nro`. Compiler,
 dependency or platform differences can change the resulting binary hash; a
 successful build alone does not establish visual correctness or performance.
 
+### CPU builds and on-console profiling
+
+The release build uses bounded GCC LTO on the translated game functions. Set
+`LTO_JOBS=2` on a small build machine. Set `MINININJAS_LTO=OFF` for a
+comparison build. An existing checkout with the old local-call optimization
+can reuse its patched `generated/` tree with these commands. Keep this source
+path for both recording and profile use.
+
+```sh
+mkdir -p build
+node tools/perf/optimize_codegen.cjs generated build/generated-cpu
+export MINININJAS_GENERATED_DIR="$PWD/build/generated-cpu"
+```
+
+1. Use `bash scripts/build-switch.sh release` to build the FPS comparison NRO
+   at `build/switch/mini-ninjas.nro`.
+2. Run `bash scripts/build-switch.sh train` and install
+   `build/switch-train/mini-ninjas.nro` in the usual game directory. This
+   build collects guest branch counters and CPU stacks. Keep its matching
+   unstripped `build/switch-train/mini-ninjas` ELF for address lookup.
+3. Play representative levels, including combat and animation. The first PGO
+   checkpoint is due 30 seconds after the first guest swap. Further checkpoints
+   are due every two minutes while frames are presented, on reported focus loss
+   and on a normal close. Each launch gets its own `pgo/run-N/` folder next
+   to the NRO. A completed `profile-K.pgo` contains the whole session up to
+   that point. Use only the highest numbered completed file from each run.
+   Copy `logs/rex/rex_perfil.log` before the next recorder launch to retain
+   the CPU stacks. The startup report and the ten-second intervals use offsets
+   relative to this exact ELF.
+4. In the same devkitA64 container import one completed stream per session.
+   The importer checks every unit, reconstructs GCC's per-run maximum from
+   the actual branch counters and can merge multiple runs from the same NRO.
+
+```sh
+python3 scripts/import-profile.py build/pgo-data /absolute/path/to/run-N/profile-K.pgo
+bash scripts/build-switch.sh use "$PWD/build/pgo-data"
+```
+
+The resulting `build/switch/mini-ninjas.nro` uses the recorded branch
+frequencies and GCC's profile-based function ordering. Both gameplay modes
+(`release` and `use`) exclude the recorder, service-call timing wrappers,
+CPU stack sampler and Partial Submit reports at build time. Keep the compiler,
+generated sources and source paths identical. Missing or incompatible
+translation-unit profiles fail the build. To look up a sampled `imagen+0x...`
+offset, pass its hexadecimal part to
+`aarch64-none-elf-addr2line -fCe build/switch-train/mini-ninjas 0x...`.
+
+The register-localization pass generates a second implementation for the
+targets in `tools/perf/local_regs.json`. Profile recording uses their original
+bodies. The additional bodies are compiled separately using the same floating
+point and aliasing settings and participate in the gameplay LTO link. To
+compare register state and memory with the original code on a Linux host, run
+`python3 tools/perf/test_local_regs.py build/generated-cpu` in the build container.
+
 To assemble the installable application files from the locally built NRO and
 the separately extracted release shader package:
 

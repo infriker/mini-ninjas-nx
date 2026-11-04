@@ -243,7 +243,7 @@ diff --git a/src/ui/deko3d/nucleo.cpp b/src/ui/deko3d/nucleo.cpp
    }
    for (const BloqueImagen& b : r.por_liberar) {
      DevolverAlTrozo(trozos_[size_t(b.trozo)], b.offset, b.bytes);
-@@ -417,11 +420,11 @@
+@@ -419,11 +422,11 @@
    if (!r.vallada) {
      return;
    }
@@ -269,7 +269,7 @@ diff --git a/src/x360/deko/destinos.cpp b/src/x360/deko/destinos.cpp
  
  #include <algorithm>
  #include <cmath>
-@@ -166,8 +168,6 @@
+@@ -172,8 +174,6 @@
                      "solo. false = huella completa cada fotograma")
      .lifecycle(rex::cvar::Lifecycle::kInitOnly);
  
@@ -278,16 +278,18 @@ diff --git a/src/x360/deko/destinos.cpp b/src/x360/deko/destinos.cpp
  // The 30 FPS guard (nfsmw_guardia_30) lives in nfsmw_recorte_sombras.cpp.
  namespace rex::x360 {
  
-@@ -551,7 +551,7 @@
- 
+@@ -558,8 +558,8 @@
  RenderDk::RenderDk(deko::ProveedorDeko3d& proveedor, rex::memory::Memory* memoria, rex::x360::RenderHooks& hooks)
      : proveedor_(proveedor), compilador_(proveedor.compilador()), memoria_(memoria), hooks_(hooks),
+       intervalo_envio_parcial_(uint32_t(REXCVAR_GET(deko_partial_submit_draws))),
+-      medir_envios_parciales_(REXCVAR_GET(deko_partial_submit_stats)),
 -      tiempos_cpu_dibujos_(REXCVAR_GET(deko_perfil_cpu_dibujos)) {
++      medir_envios_parciales_(REX_SWITCH_PROFILING && REXCVAR_GET(deko_partial_submit_stats)),
 +      tiempos_cpu_dibujos_(REX_SWITCH_PROFILING && REXCVAR_GET(deko_perfil_cpu_dibujos)) {
    deko::ConfigNucleo config;
    config.ranuras = kRanuras;
    config.mb_subida = uint32_t(REXCVAR_GET(nfsmw_dk_subida_mb));
-@@ -565,7 +565,7 @@
+@@ -573,7 +573,7 @@
    geometria_.Crear(nucleo_, uint32_t(REXCVAR_GET(nfsmw_dk_geometria_mb)), REXCVAR_GET(nfsmw_dk_geometria_muestreo));
    descriptores_por_liberar_.resize(kRanuras);
    lecturas_.resize(kRanuras);
@@ -296,7 +298,7 @@ diff --git a/src/x360/deko/destinos.cpp b/src/x360/deko/destinos.cpp
    lectura_bloque_ = nucleo_.CrearBloqueLectura(kRanuras * kBytesLecturaRanura, "lecturas de vuelta (por ranura)");
    // GPU-cached: atomics and stores in uncached memory went to DRAM one by one (Halo 3's particle updates, 20 ms a
    // frame). The fence flushes them; the region's counter is zeroed through the command list.
-@@ -579,7 +579,7 @@
+@@ -587,7 +587,7 @@
    }
    lectura_cpu_ = static_cast<uint8_t*>(dkMemBlockGetCpuAddr(lectura_bloque_));
    lectura_gpu_ = dkMemBlockGetGpuAddr(lectura_bloque_);
@@ -305,7 +307,7 @@ diff --git a/src/x360/deko/destinos.cpp b/src/x360/deko/destinos.cpp
      perfil_bloque_ = nucleo_.CrearBloqueLectura(kMarcasPerfil * 32, "perfil de la GPU por dibujo");
      perfil_cpu_ = static_cast<uint8_t*>(dkMemBlockGetCpuAddr(perfil_bloque_));
      perfil_gpu_ = dkMemBlockGetGpuAddr(perfil_bloque_);
-@@ -697,7 +697,7 @@
+@@ -705,7 +705,7 @@
      EscribirPasos();
    }
    lecturas_[trabajo_ % kRanuras].trabajo = trabajo_;
@@ -314,20 +316,54 @@ diff --git a/src/x360/deko/destinos.cpp b/src/x360/deko/destinos.cpp
    dedupe_.NuevoFotograma(trabajo_);  // a new upload ring: the copies of the previous works are not here
    geometria_.NuevoTrabajo(trabajo_);
    InicioDeTrabajo();
-@@ -705,8 +705,10 @@
+@@ -713,10 +713,12 @@
  
  void RenderDk::InicioDeTrabajo() {
+   dibujos_sin_envio_ = 0;
+-  sondeo_hecho_ = false;
    DkCmdBuf cmd = nucleo_.comandos();
 -  marcas_[trabajo_ % kRanuras].clear();
 -  MarcarGpu(kGpuOtros);  // the work's start
 +  if (REX_SWITCH_PROFILING) {
++    sondeo_hecho_ = false;
 +    marcas_[trabajo_ % kRanuras].clear();
 +    MarcarGpu(kGpuOtros);  // the work's start
 +  }
    // Another command list: what the previous one drew may still be in flight when a transfer of this one starts.
    trabajo_3d_sin_barrera_ = true;
    transferencia_sin_barrera_ = false;
-@@ -748,7 +750,7 @@
+@@ -739,7 +741,7 @@
+   ++dibujos_sin_envio_;
+   // Once per work, before its first split. A completed previous game fence
+   // means this chunk could already have fed the GPU. Never wait on the CPU.
+-  if (medir_envios_parciales_ && !sondeo_hecho_ && trabajo_ > 1 &&
++  if (REX_SWITCH_PROFILING && medir_envios_parciales_ && !sondeo_hecho_ && trabajo_ > 1 &&
+       dibujos_sin_envio_ == (intervalo_envio_parcial_ ? std::min(128u, intervalo_envio_parcial_) : 128u)) {
+     ++ventana_envios_.sondeos;
+     ventana_envios_.previos_listos += nucleo_.TrabajoTerminado(trabajo_ - 1);
+@@ -758,9 +760,10 @@
+   dkCmdBufBindMultisampleState(nucleo_.comandos(), &una);
+   RestablecerListaDeDibujos();
+   dibujos_sin_envio_ = 0;
+-  if (medir_envios_parciales_) ++ventana_envios_.parciales;
+-}
+-
++  if (REX_SWITCH_PROFILING && medir_envios_parciales_) ++ventana_envios_.parciales;
++}
++
++#if REX_SWITCH_PROFILING
+ void RenderDk::InformarEnviosParciales(uint64_t ahora) {
+   auto& v = ventana_envios_;
+   const uint64_t hueco = gpu_categorias_ns_[kGpuHuecoEntreTrabajos];
+@@ -777,6 +780,7 @@
+   }
+   v = {.inicio = ahora, .dibujos = dibujados_, .trabajos_gpu = gpu_trabajos_, .hueco_gpu_ns = hueco};
+ }
++#endif
+ 
+ void RenderDk::CerrarTrabajo() {
+   if (!nucleo_.TrabajoAbierto()) {
+@@ -805,7 +809,7 @@
  }
  
  void RenderDk::MarcarGpu(uint32_t categoria) {
@@ -336,24 +372,27 @@ diff --git a/src/x360/deko/destinos.cpp b/src/x360/deko/destinos.cpp
      return;
    }
    std::vector<uint8_t>& m = marcas_[trabajo_ % kRanuras];
-@@ -3007,10 +3009,15 @@
+@@ -3064,11 +3068,18 @@
  bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swap, uint32_t ancho, uint32_t alto) {
    dibujos_ultimo_fotograma_ = dibujados_ - dibujados_al_swap_;
    dibujados_al_swap_ = dibujados_;
 -  RexSwitchPerfCount(0);  // the profiler's "juego N fps"
 +  if (REX_SWITCH_PROFILING) {
-+    RexSwitchPerfCount(0);
++    RexSwitchPerfCount(0);  // the profiler's "juego N fps"
 +  } else {
 +    rex::ui::switch_saltynx::Latir(ancho, alto);
 +  }
    const uint64_t ahora = deko::AhoraNs();
++#if REX_SWITCH_PROFILING
+   if (medir_envios_parciales_) InformarEnviosParciales(ahora);
++#endif
    if (ultimo_swap_ns_) {
      const double ms = double(ahora - ultimo_swap_ns_) / 1e6;
 +#if REX_SWITCH_PROFILING
      const uint32_t cubeta = ms < 15.0    ? 0
                              : ms < 18.0  ? 1
                              : ms < 25.0  ? 2
-@@ -3024,6 +3031,7 @@
+@@ -3082,6 +3093,7 @@
                                           : 10;
      ++cubetas_swap_[cubeta];
      peor_swap_ms_ = std::max(peor_swap_ms_, ms);
@@ -361,7 +400,7 @@ diff --git a/src/x360/deko/destinos.cpp b/src/x360/deko/destinos.cpp
      hooks_.Latido(ms);
    }
    ultimo_swap_ns_ = ahora;
-@@ -3142,7 +3150,7 @@
+@@ -3200,7 +3212,7 @@
    }
    ++fotograma_;
    geometria_.NuevoFotograma(fotograma_);
@@ -419,9 +458,15 @@ diff --git a/src/x360/deko/dibujos.cpp b/src/x360/deko/dibujos.cpp
      // The repeat test: the first draw of a pass, when drawing it again changes nothing, is drawn and timed twice. A
      // second time much faster than the first means the first paid for something else (a flush, a wait), not for
      // its pixels.
-@@ -2874,7 +2876,7 @@
+@@ -2874,11 +2876,12 @@
+     }
    }
    ++dibujados_;
+-  if ((intervalo_envio_parcial_ || medir_envios_parciales_) && !es_cielo && trabajo_ == trabajo_del_dibujo) {
++  if ((intervalo_envio_parcial_ || (REX_SWITCH_PROFILING && medir_envios_parciales_)) &&
++      !es_cielo && trabajo_ == trabajo_del_dibujo) {
+     TrasDibujoParaEnvio();
+   }
    cortar_etapa(5);
 -  if (tiempos_cpu_dibujos_) {
 +  if (medir_cpu) {
