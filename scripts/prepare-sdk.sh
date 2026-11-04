@@ -21,6 +21,10 @@ git -C sdk apply --check ../patches/partial-submit.patch
 git -C sdk apply ../patches/partial-submit.patch
 git -C sdk apply --check ../patches/gameplay-no-profiler.patch
 git -C sdk apply ../patches/gameplay-no-profiler.patch
+git -C sdk apply --check ../patches/audio-playback.patch
+git -C sdk apply ../patches/audio-playback.patch
+git -C sdk apply --check ../patches/audio-no-profiling.patch
+git -C sdk apply ../patches/audio-no-profiling.patch
 git -C sdk submodule update --init --depth 1 --jobs "${JOBS:-4}" \
   thirdparty/cli11 thirdparty/libmspack thirdparty/FFmpeg thirdparty/tomlplusplus \
   thirdparty/simde thirdparty/xxHash thirdparty/spdlog thirdparty/fmt thirdparty/utfcpp \

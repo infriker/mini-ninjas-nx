@@ -1,0 +1,491 @@
+diff --git a/src/audio/audio_system.cpp b/src/audio/audio_system.cpp
+--- a/src/audio/audio_system.cpp
++++ b/src/audio/audio_system.cpp
+@@ -20,6 +20,7 @@
+ #include <rex/audio/xma/decoder.h>
+ #include <rex/dbg.h>
+ #include <rex/logging.h>
++#include <rex/ui/switch_perf_hooks.h>
+ #include <rex/math.h>
+ #include <rex/memory/ring_buffer.h>
+ #include <rex/platform.h>
+@@ -122,7 +123,9 @@
+   Initialize();
+ 
+   // Main run loop.
++#if REX_SWITCH_PROFILING
+   uint32_t diag_pump_count = 0;
++#endif
+   while (worker_running_) {
+     // These handles signify the number of submitted samples. Once we reach
+     // 64 samples, we wait until our audio backend releases a semaphore
+@@ -135,9 +138,11 @@
+     }
+ 
+     if (result.first == rex::thread::WaitResult::kTimeout) {
++#if REX_SWITCH_PROFILING
+       if (diag_pump_count < 5) {
+         REXAPU_NOISY_DEBUG("AudioWorker: WaitAny timed out (no semaphore signals)");
+       }
++#endif
+ #if REX_PLATFORM_SWITCH
+       // Wait again on the semaphore. A client starting after silence can wake
+       // this wait immediately; an extra fixed sleep loses up to 500 ms.
+@@ -169,10 +174,12 @@
+       if (leased) {
+         auto release = [this, index](AudioSystem*) { ReleaseCallback(index); };
+         std::unique_ptr<AudioSystem, decltype(release)> callback_lease(this, release);
++#if REX_SWITCH_PROFILING
+         if (diag_pump_count < 10) {
+           REXAPU_DEBUG("AudioWorker: dispatching callback {:08X} with arg {:08X} for client {}",
+                        client_callback, client_callback_arg, index);
+         }
++#endif
+         if (const GanchoAntesDeTrama gancho = g_gancho_antes_de_trama.load(std::memory_order_acquire)) {
+           gancho(index);
+         }
+@@ -180,10 +187,12 @@
+         uint64_t args[] = {client_callback_arg};
+         function_dispatcher_->Execute(worker_thread_->thread_state(), client_callback, args,
+                                       rex::countof(args));
++#if REX_SWITCH_PROFILING
+         if (diag_pump_count < 10) {
+           REXAPU_DEBUG("AudioWorker: callback returned for client {}", index);
+         }
+         diag_pump_count++;
++#endif
+       } else {
+         REXAPU_DEBUG("AudioWorker: semaphore signaled for client {} but callback is 0", index);
+       }
+@@ -305,12 +314,14 @@
+ void AudioSystem::SubmitFrame(size_t index, uint32_t samples_ptr) {
+   SCOPE_profile_cpu_f("apu");
+ 
++#if REX_SWITCH_PROFILING
+   static uint32_t submit_count = 0;
+   if (submit_count < 10) {
+     REXAPU_DEBUG("AudioSystem::SubmitFrame called: index={} samples_ptr={:08X}", index,
+                  samples_ptr);
+     submit_count++;
+   }
++#endif
+ 
+   auto global_lock = global_critical_region_.Acquire();
+   if (index >= kMaximumClientCount || !clients_[index].in_use || clients_[index].retired ||
+diff --git a/src/audio/switch/switch_audio_system.cpp b/src/audio/switch/switch_audio_system.cpp
+--- a/src/audio/switch/switch_audio_system.cpp
++++ b/src/audio/switch/switch_audio_system.cpp
+@@ -38,6 +38,7 @@
+                      "salida, a cambio de latencia: nfsmw_audio_esperar_servidor_ms espera hasta 30 ms; se lee "
+                      "al abrir el audio");
+ 
++#if REX_SWITCH_PROFILING
+ REXCVAR_DEFINE_INT32(audio_volcado_inicio_s, 0, "Audio",
+                      "Pruebas: a partir de este segundo de audio, guarda en logs/rex/audio_volcado.wav lo que sale "
+                      "por audout (audio_volcado_duracion_s segundos) y en audio_volcado.txt los huecos; 0 = nunca")
+@@ -46,6 +47,7 @@
+     .range(1, 60);
+ 
+ extern "C" const char* RexSwitchLogDir(void);
++#endif
+ 
+ namespace rex::audio::nx {
+ 
+@@ -165,11 +167,13 @@
+   std::array<AudioOutBuffer, kBufferCount> buffers{};
+   std::array<s16*, kBufferCount> samples{};
+   std::array<float, kBufferSamples * 2> mix{};
++#if REX_SWITCH_PROFILING
+   // audio_volcado_inicio_s: buffers appended so far, and the recording (stereo s16) with its gaps.
+   uint64_t buffers_appended = 0;
+   std::vector<s16> volcado;
+   std::string huecos;
+   bool volcado_hecho = false;
++#endif
+ };
+ 
+ std::unique_ptr<AudioSystem> SwitchAudioSystem::Create(
+@@ -362,6 +366,7 @@
+   }
+ }
+ 
++#if REX_SWITCH_PROFILING
+ // Testing (audio_volcado_inicio_s): what goes out, as a WAV, and the buffers that had a guest frame missing (each
+ // 5.33 ms of silence), to find what makes the crackle. Written once, from this thread, when the recording is full.
+ void SwitchAudioSystem::Volcar(const int16_t* samples, uint32_t frames_missing) {
+@@ -406,6 +411,7 @@
+   output.volcado.clear();
+   output.volcado.shrink_to_fit();
+ }
++#endif
+ 
+ void SwitchAudioSystem::PumpTick() {
+   std::lock_guard<std::mutex> guard(drivers_mutex_);
+diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
+--- a/src/audio/xma_context.cpp
++++ b/src/audio/xma_context.cpp
+@@ -28,6 +28,7 @@
+ #include <rex/audio/xma/helpers.h>
+ #include <rex/dbg.h>
+ #include <rex/logging.h>
++#include <rex/ui/switch_perf_hooks.h>
+ #include <rex/memory/ring_buffer.h>
+ #include <rex/platform.h>
+ #include <rex/stream.h>
+@@ -49,6 +50,7 @@
+ // Credits for most of this code goes to:
+ // https://github.com/koolkdev/libertyv/blob/master/libav_wrapper/xma2dec.c
+ 
++#if REX_SWITCH_PROFILING
+ REXCVAR_DEFINE_INT32(audio_volcado_xma_s, 0, "Audio",
+                      "Diagnostico: segundos de cada contexto XMA que se guardan en "
+                      "xma_<contexto>_tramas/salida_<hz>.wav junto al ejecutable; 0 = nada");
+@@ -272,6 +274,7 @@
+ }
+ 
+ }  // namespace
++#endif
+ 
+ namespace rex::audio {
+ 
+@@ -329,6 +332,7 @@
+   return 0;
+ }
+ 
++#if REX_SWITCH_PROFILING
+ /*
+  * NFSMW: silence watchdog, measurement only.
+  *
+@@ -366,6 +370,7 @@
+                 uint32_t(data.input_buffer_1_valid), uint32_t(data.current_buffer), uint32_t(data.loop_count));
+   }
+ }
++#endif
+ 
+ bool XmaContext::Work() {
+   if (!is_allocated() || !is_enabled()) {
+@@ -420,7 +425,9 @@
+       data.output_buffer_valid = 0;
+     }
+     StoreContextMerged(data, initial_data, context_ptr);
++#if REX_SWITCH_PROFILING
+     AnotarProduccion(output_bytes_written != 0, 1, data);  // Measurement only
++#endif
+     return true;
+   }
+ 
+@@ -432,11 +439,15 @@
+ 
+   if (minimum_subframe_decode_count > remaining_subframe_blocks_in_output_buffer_) {
+     StoreContextMerged(data, initial_data, context_ptr);
++#if REX_SWITCH_PROFILING
+     AnotarProduccion(true, 0, data);  // output full, not silence
++#endif
+     return true;
+   }
+ 
++#if REX_SWITCH_PROFILING
+   uint8_t motivo_silencio = 0;  // Measurement only
++#endif
+   while (remaining_subframe_blocks_in_output_buffer_ >= minimum_subframe_decode_count) {
+     const uint32_t previous_offset = data.input_buffer_read_offset;
+     const uint32_t previous_buffer = data.current_buffer;
+@@ -452,7 +463,9 @@
+     // read position or re-enabling this context.
+     if ((!data.IsAnyInputBufferValid() && !current_frame_remaining_subframes_) ||
+         data.error_status == 4) {
++#if REX_SWITCH_PROFILING
+       motivo_silencio = data.error_status == 4 ? 4 : 2;
++#endif
+       break;
+     }
+     // A frame's continuation may be missing while the producer refills the other
+@@ -463,7 +476,9 @@
+         previous_valid == (data.input_buffer_0_valid | (data.input_buffer_1_valid << 1)) &&
+         previous_loop_count == data.loop_count &&
+         previous_subframes == current_frame_remaining_subframes_) {
++#if REX_SWITCH_PROFILING
+       motivo_silencio = 3;
++#endif
+       break;
+     }
+   }
+@@ -476,7 +491,9 @@
+   }
+ 
+   StoreContextMerged(data, initial_data, context_ptr);
++#if REX_SWITCH_PROFILING
+   AnotarProduccion(output_bytes_written != 0, motivo_silencio, data);  // Measurement only
++#endif
+   return true;
+ }
+ 
+@@ -519,7 +536,9 @@
+ }
+ 
+ void XmaContext::ResetDecoderState() {
++#if REX_SWITCH_PROFILING
+   ReiniciarVolcadoXma(id());  // diagnostico audio_volcado_xma_s
++#endif
+   // A freed or re-initialized context is a new logical stream, so the previous
+   // wave's MDCT overlap-add tail must not survive into frame 0 of the next one.
+   // avcodec_flush_buffers() cannot drop it: ff_xmaframes_decoder declares no
+@@ -531,7 +550,9 @@
+     av_context_->channels = 0;
+   }
+   raw_frame_.fill(0);
++#if REX_SWITCH_PROFILING
+   en_silencio_ = false;  // a new sound does not inherit the previous one's silence
++#endif
+   current_frame_remaining_subframes_ = 0;
+   loop_frame_output_limit_ = 0;
+   loop_start_skip_pending_ = false;
+@@ -821,9 +842,11 @@
+   const uint32_t written = static_cast<uint32_t>(output_rb->Write(
+       raw_frame_.data() + (kOutputBytesPerBlock * raw_frame_read_offset),
+       subframes_to_write * kOutputBytesPerBlock));
++#if REX_SWITCH_PROFILING
+   // Diagnostic (audio_volcado_xma_s): the blocks as they reach the game's buffer.
+   VolcarXma(id(), 1, GetSampleRate(data->sample_rate), data->is_stereo ? 2 : 1,
+             raw_frame_.data() + (kOutputBytesPerBlock * raw_frame_read_offset), written);
++#endif
+ 
+   const int8_t headroom = (current_frame_remaining_subframes_ - subframes_to_write == 0)
+                               ? data->output_buffer_padding
+@@ -1043,9 +1066,11 @@
+   if (decoded) {
+     ConvertFrame(reinterpret_cast<const uint8_t**>(&av_frame_->data), bool(data->is_stereo),
+                  raw_frame_.data());
++#if REX_SWITCH_PROFILING
+     // Diagnostic (audio_volcado_xma_s): the whole frame as it comes out of FFmpeg.
+     VolcarXma(id(), 0, GetSampleRate(data->sample_rate), data->is_stereo ? 2 : 1, raw_frame_.data(),
+               size_t(kBytesPerFrameChannel) << data->is_stereo);
++#endif
+ 
+     // NFSMW discards 384 samples at the start of each sound in sub_825E1CD0.
+     // Deliver the decoder's whole block: shifting it by 192 samples and holding
+diff --git a/src/audio/xma_decoder.cpp b/src/audio/xma_decoder.cpp
+--- a/src/audio/xma_decoder.cpp
++++ b/src/audio/xma_decoder.cpp
+@@ -14,6 +14,7 @@
+ #include <rex/cvar.h>
+ #include <rex/dbg.h>
+ #include <rex/logging.h>
++#include <rex/ui/switch_perf_hooks.h>
+ #include <rex/perf/counter.h>
+ #include <rex/math.h>
+ #include <rex/memory/ring_buffer.h>
+@@ -191,6 +192,7 @@
+  */
+ namespace {
+ 
++#if REX_SWITCH_PROFILING
+ struct MedidaXma {
+   std::atomic<uint64_t> kicks{0};
+   std::atomic<uint64_t> kick_contextos{0};
+@@ -212,6 +214,7 @@
+ };
+ 
+ MedidaXma g_medida_xma;
++#endif
+ 
+ /*
+  * Contexts a kick has just enabled that the worker has not served yet: 320 bits in 10 words.
+@@ -220,12 +223,14 @@
+  */
+ constexpr uint32_t kPalabrasPendientes = 10;  // 320 contextos / 32
+ std::atomic<uint32_t> g_pendientes[kPalabrasPendientes];
++#if REX_SWITCH_PROFILING
+ std::atomic<int64_t> g_pendiente_desde_ns{0};
+ 
+ int64_t AhoraNs() {
+   using namespace std::chrono;
+   return duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
+ }
++#endif
+ 
+ void MarcarPendiente(uint32_t context_id) {
+   g_pendientes[context_id / 32].fetch_or(1u << (context_id % 32), std::memory_order_release);
+@@ -237,6 +242,7 @@
+   return (g_pendientes[context_id / 32].fetch_and(~bit, std::memory_order_acquire) & bit) != 0;
+ }
+ 
++#if REX_SWITCH_PROFILING
+ int64_t AhoraMsXma() {
+   using namespace std::chrono;
+   return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+@@ -290,6 +296,7 @@
+               latencia_n ? double(latencia_ns) / double(latencia_n) / 1e3 : 0.0, double(latencia_max) / 1e6,
+               latencia_n);
+ }
++#endif
+ 
+ }  // namespace
+ 
+@@ -310,20 +317,27 @@
+           continue;  // the kick thread took it (mode 2)
+         }
+         habia_pendientes = true;
++#if REX_SWITCH_PROFILING
+         const auto antes = std::chrono::steady_clock::now();
++#endif
+         XmaContext& context = contexts_[n];
+         const bool worked = context.Work();
++#if REX_SWITCH_PROFILING
+         const uint64_t ns = DesdeNs(antes);
++#endif
+         if (worked) {
+           context.SignalWorkDone();
+           PROFILE_XMA_FRAME_DECODED();
++#if REX_SWITCH_PROFILING
+           g_medida_xma.contextos_trabajador.fetch_add(1, std::memory_order_relaxed);
+           g_medida_xma.trabajo_ns.fetch_add(ns, std::memory_order_relaxed);
+           MaximoXma(g_medida_xma.trabajo_max_ns, ns);
++#endif
+         }
+         did_work = did_work || worked;
+       }
+     }
++#if REX_SWITCH_PROFILING
+     if (habia_pendientes) {
+       // From the kick to the data being written: the latency the game could notice.
+       const int64_t desde = g_pendiente_desde_ns.load(std::memory_order_acquire);
+@@ -334,6 +348,7 @@
+         MaximoXma(g_medida_xma.latencia_max_ns, latencia);
+       }
+     }
++#endif
+     // Full sweep as a safety net: it is how it used to work, and it serves any context left enabled
+     // without a mark. Only when there were no pending ones, so the 320 locks are not walked after every
+     // kick and the fast loop keeps the work being counted.
+@@ -504,8 +519,10 @@
+      * notifications but polls the context sleeping 50 us per iteration, finds the data already written.
+      */
+     const int32_t modo_trabajador = REXCVAR_GET(audio_xma_en_trabajador);
++#if REX_SWITCH_PROFILING
+     const auto kick_antes = std::chrono::steady_clock::now();
+     uint64_t kick_contextos = 0;
++#endif
+     if (modo_trabajador != 0) {
+       uint32_t marcados = kicked_value;
+       for (int i = 0; marcados && i < 32; ++i, marcados >>= 1) {
+@@ -513,7 +530,9 @@
+           MarcarPendiente(base_context_id + i);
+         }
+       }
++#if REX_SWITCH_PROFILING
+       g_pendiente_desde_ns.store(AhoraNs(), std::memory_order_release);
++#endif
+       work_event_->Set();
+     }
+     for (int i = 0; kicked_value && i < 32; ++i, kicked_value >>= 1) {
+@@ -528,40 +547,50 @@
+         if (modo_trabajador == 2 && !TomarPendiente(context_id)) {
+           continue;  // the worker has taken it
+         }
++#if REX_SWITCH_PROFILING
+         ++kick_contextos;
+         if (modo_trabajador != 0) {
+           g_medida_xma.contextos_respaldo.fetch_add(1, std::memory_order_relaxed);
+         }
++#endif
+         if (context.Work()) {
+           context.SignalWorkDone();
+         }
+       }
+     }
++#if REX_SWITCH_PROFILING
+     // Measurement only: how much decoding right here costs the thread requesting the kick.
+     const uint64_t kick_ns = DesdeNs(kick_antes);
+     g_medida_xma.kicks.fetch_add(1, std::memory_order_relaxed);
+     g_medida_xma.kick_contextos.fetch_add(kick_contextos, std::memory_order_relaxed);
+     g_medida_xma.kick_ns.fetch_add(kick_ns, std::memory_order_relaxed);
+     MaximoXma(g_medida_xma.kick_max_ns, kick_ns);
++#endif
+     if (modo_trabajador == 0) {
+       // With the worker already notified above, repeating the notification leaves the (auto-reset) event
+       // signaled after its iteration and costs a full sweep of the 320 contexts per kick, 1,555 times per
+       // second.
+       work_event_->Set();
+     }
++#if REX_SWITCH_PROFILING
+     InformarXma();
++#endif
+   } else if (r >= XmaRegister::Context0Lock && r <= XmaRegister::Context9Lock) {
+     // Context lock command.
+     // This requests a lock by flagging the context.
+     // XMADisableContext
+     uint32_t base_context_id = (r - XmaRegister::Context0Lock) * 32;
++#if REX_SWITCH_PROFILING
+     const auto lock_antes = std::chrono::steady_clock::now();
+     uint64_t lock_contextos = 0;
++#endif
+     for (int i = 0; value && i < 32; ++i, value >>= 1) {
+       if (value & 1) {
+         uint32_t context_id = base_context_id + i;
+         auto& context = contexts_[context_id];
++#if REX_SWITCH_PROFILING
+         ++lock_contextos;
++#endif
+         context.Disable();
+         // [XMA fix] Added Block(false) after Disable(). Without this, the game
+         // could call XMADisableContext and start modifying the context struct
+@@ -570,6 +599,7 @@
+         context.Block(false);
+       }
+     }
++#if REX_SWITCH_PROFILING
+     // Measurement only: how long the thread requesting the lock waits for the worker to release the
+     // context.
+     const uint64_t lock_ns = DesdeNs(lock_antes);
+@@ -578,6 +608,7 @@
+     g_medida_xma.lock_ns.fetch_add(lock_ns, std::memory_order_relaxed);
+     MaximoXma(g_medida_xma.lock_max_ns, lock_ns);
+     InformarXma();
++#endif
+     // Signal the decoder thread to start processing.
+     // work_event_->Set();
+   } else if (r >= XmaRegister::Context0Clear && r <= XmaRegister::Context9Clear) {
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_audio.cpp b/src/kernel/xboxkrnl/xboxkrnl_audio.cpp
+--- a/src/kernel/xboxkrnl/xboxkrnl_audio.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_audio.cpp
+@@ -22,6 +22,7 @@
+ #include <rex/runtime.h>
+ #include <rex/system/kernel_state.h>
+ #include <rex/system/xthread.h>
++#include <rex/ui/switch_perf_hooks.h>
+ #include <rex/system/xtypes.h>
+ 
+ #include <algorithm>
+@@ -37,6 +38,7 @@
+ #include <unordered_map>
+ #include <vector>
+ 
++#if REX_SWITCH_PROFILING
+ REXCVAR_DEFINE_INT32(audio_volcado_s, 0, "Audio",
+                      "Diagnostico: segundos del audio que entrega el juego (6 canales, antes del "
+                      "driver) que se guardan en audio_volcado_<cliente>.wav junto al ejecutable; "
+@@ -175,6 +177,7 @@
+ }
+ 
+ }  // namespace
++#endif
+ 
+ // Switch: the game thread that feeds the audio callback goes one step above the other game threads (rex::system,
+ // xevent.cpp, finds it). Here, at file scope, so other files can declare it.
+@@ -253,6 +256,7 @@
+ u32 XAudioSubmitRenderDriverFrame_entry(mapped_void driver_ptr, mapped_void samples_ptr) {
+   assert_true((driver_ptr.guest_address() & 0xFFFF0000) == 0x41550000);
+ 
++#if REX_SWITCH_PROFILING
+   static uint32_t submit_krnl_count = 0;
+   if (submit_krnl_count < 10) {
+     REXKRNL_DEBUG("XAudioSubmitRenderDriverFrame: driver={:08X} samples={:08X}",
+@@ -263,6 +267,7 @@
+   // Diagnostics (audio_volcado_s): copy of the frame before the driver; nothing else changes.
+   VolcarTrama(driver_ptr.guest_address() & 0x0000FFFF,
+               REX_KERNEL_MEMORY()->TranslateVirtual<const uint8_t*>(samples_ptr.guest_address()));
++#endif
+ 
+   auto* audio_system =
+       static_cast<audio::AudioSystem*>(REX_KERNEL_STATE()->emulator()->audio_system());

@@ -14,8 +14,8 @@ program package needed by its renderer; see [distribution contents](docs/install
 
 ## Experimental performance build
 
-The [v1.0.4-exp.1 prerelease](https://github.com/infriker/mini-ninjas-nx/releases/tag/v1.0.4-exp.1)
-is an NRO-only update for an existing v1.0.3 installation. Replace
+The [v1.0.4-exp.2 prerelease](https://github.com/infriker/mini-ninjas-nx/releases/tag/v1.0.4-exp.2)
+is an NRO-only update for an existing v1.0.3 or v1.0.4 installation. Replace
 `sdmc:/switch/mini-ninjas/mini-ninjas.nro`. It uses a gameplay profile recorded
 on Switch and sends GPU work every 128 guest draws by default. The gameplay NRO
 does not collect profiling data. See [performance](docs/performance.md) for the

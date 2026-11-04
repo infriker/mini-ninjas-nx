@@ -33,6 +33,14 @@
     {
       "path": "gameplay-no-profiler.patch",
       "sha256": "903726c24e043898cabb7c910ff037b10326fbc46ac6c863284475e8a0bd038b"
+    },
+    {
+      "path": "audio-playback.patch",
+      "sha256": "6d83e68da783a3bdc39de71573718a32736d17ca3392fede4a78b72ab0d22a86"
+    },
+    {
+      "path": "audio-no-profiling.patch",
+      "sha256": "461da9c10cd9d615ee250afa56120b4b61dad35e5384ce7f209683984439edb5"
     }
   ],
   "submodule_commits": {
