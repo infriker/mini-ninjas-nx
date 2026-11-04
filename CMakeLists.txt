@@ -16,6 +16,7 @@ if(NOT EXISTS "${MINININJAS_GENERATED_DIR}/minininjas_init.h")
   message(FATAL_ERROR "Generated minininjas_init.h missing from ${MINININJAS_GENERATED_DIR}")
 endif()
 
+set(REXGLUE_SWITCH_RUNTIME_PROFILING OFF)
 add_subdirectory("${REXSDK_DIR}" rexglue-sdk)
 include("${MINININJAS_GENERATED_DIR}/sources.cmake")
 if(NOT GENERATED_SOURCES)
@@ -46,5 +47,5 @@ target_compile_definitions(mini-ninjas PRIVATE MINININJAS_DEKO3D=1 MINININJAS_NA
 target_link_libraries(mini-ninjas PRIVATE minininjas_recomp rex::runtime)
 rexglue_configure_target(mini-ninjas)
 rexglue_switch_add_deko3d(mini-ninjas)
-rexglue_switch_add_nro(mini-ninjas NAME "Mini Ninjas NX" AUTHOR "infriker" VERSION "1.0.3"
+rexglue_switch_add_nro(mini-ninjas NAME "Mini Ninjas NX" AUTHOR "infriker" VERSION "1.0.4"
   ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/icon.jpg")

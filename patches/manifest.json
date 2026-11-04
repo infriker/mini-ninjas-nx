@@ -21,6 +21,18 @@
     {
       "path": "minininjas-depth-bias.patch",
       "sha256": "174c7e13e91df3c218a36cd6903d5a381ee03187407ef3925459abfaa9ce50f7"
+    },
+    {
+      "path": "gameplay-no-profiler.patch",
+      "sha256": "3392bbd5c4378126c2dc31c931ec5545b3a7ae52228bd291321ac3486f819978"
+    },
+    {
+      "path": "audio-playback.patch",
+      "sha256": "6d83e68da783a3bdc39de71573718a32736d17ca3392fede4a78b72ab0d22a86"
+    },
+    {
+      "path": "audio-no-profiling.patch",
+      "sha256": "461da9c10cd9d615ee250afa56120b4b61dad35e5384ce7f209683984439edb5"
     }
   ],
   "submodule_commits": {

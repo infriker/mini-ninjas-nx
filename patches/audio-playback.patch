@@ -1,0 +1,284 @@
+diff --git a/include/rex/audio/xma/context.h b/include/rex/audio/xma/context.h
+--- a/include/rex/audio/xma/context.h
++++ b/include/rex/audio/xma/context.h
+@@ -123,6 +123,27 @@
+     return rex::byte_swap(std::atomic_ref<uint32_t>(words[index]).load(std::memory_order_acquire));
+   }
+ 
++  // The game and decoder own different fields, sometimes in the same big-endian word.
++  // A live update must not copy back either the other side's cursor or its valid bits.
++  static constexpr uint32_t kPacketCount = 0xfff, kLoopCount = 0xffu << 12;
++  static constexpr uint32_t kInput0Valid = 1u << 20, kInput1Valid = 1u << 21;
++  static constexpr uint32_t kOutputWrite = 31u << 27, kOutputRead = 31;
++  static constexpr uint32_t kBitOffset = (1u << 26) - 1, kError = 31u << 26;
++  static constexpr uint32_t kCurrentInput = 1u << 31, kOutputValid = 1u << 31;
++
++  static void UpdateWord(void* ptr, size_t index, uint32_t mask, uint32_t bits) {
++    auto word = std::atomic_ref<uint32_t>(static_cast<uint32_t*>(ptr)[index]);
++    const uint32_t value = rex::byte_swap(bits & mask);
++    if (mask == UINT32_MAX) {
++      word.store(value, std::memory_order_release);
++      return;
++    }
++    const uint32_t keep = rex::byte_swap(~mask);
++    uint32_t seen = word.load(std::memory_order_relaxed);
++    while (!word.compare_exchange_weak(seen, (seen & keep) | value,
++                                      std::memory_order_release, std::memory_order_relaxed)) {}
++  }
++
+   explicit XMA_CONTEXT_DATA(const void* ptr) {
+     auto* words = reinterpret_cast<uint32_t*>(this);
+     for (size_t i = 0; i < sizeof(XMA_CONTEXT_DATA) / 4; ++i) {
+@@ -264,7 +285,6 @@
+ 
+   void Decode(XMA_CONTEXT_DATA* data);
+   uint32_t Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA* data);
+-  void UpdateLoopStatus(XMA_CONTEXT_DATA* data);
+   void ClearLocked(XMA_CONTEXT_DATA* data);
+   void ResetDecoderState();
+ 
+diff --git a/src/audio/audio_system.cpp b/src/audio/audio_system.cpp
+--- a/src/audio/audio_system.cpp
++++ b/src/audio/audio_system.cpp
+@@ -138,6 +138,11 @@
+       if (diag_pump_count < 5) {
+         REXAPU_NOISY_DEBUG("AudioWorker: WaitAny timed out (no semaphore signals)");
+       }
++#if REX_PLATFORM_SWITCH
++      // Wait again on the semaphore. A client starting after silence can wake
++      // this wait immediately; an extra fixed sleep loses up to 500 ms.
++      continue;
++#endif
+     }
+ 
+     if (result.first == thread::WaitResult::kSuccess && result.second == kMaximumClientCount) {
+diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
+--- a/src/audio/xma_context.cpp
++++ b/src/audio/xma_context.cpp
+@@ -562,26 +562,6 @@
+   data->input_buffer_read_offset = kBitsPerPacketHeader;
+ }
+ 
+-void XmaContext::UpdateLoopStatus(XMA_CONTEXT_DATA* data) {
+-  if (data->loop_count == 0) {
+-    return;
+-  }
+-
+-  const uint32_t loop_start = std::max(kBitsPerPacketHeader, data->loop_start);
+-  const uint32_t loop_end = std::max(kBitsPerPacketHeader, data->loop_end);
+-
+-  if (data->input_buffer_read_offset != loop_end) {
+-    return;
+-  }
+-
+-  data->input_buffer_read_offset = loop_start;
+-  loop_start_skip_pending_ = true;
+-
+-  if (data->loop_count < 255) {
+-    data->loop_count--;
+-  }
+-}
+-
+ int XmaContext::GetSampleRate(int id) {
+   return kIdToSampleRate[std::min(id, 3)];
+ }
+@@ -768,27 +748,32 @@
+ 
+ void XmaContext::StoreContextMerged(const XMA_CONTEXT_DATA& data,
+                                     const XMA_CONTEXT_DATA& initial_data, uint8_t* context_ptr) {
+-  XMA_CONTEXT_DATA fresh(context_ptr);
+-
+-  fresh.loop_count = data.loop_count;
+-  fresh.output_buffer_write_offset = data.output_buffer_write_offset;
++  using C = XMA_CONTEXT_DATA;
++  uint32_t input_mask = 0;
++  if (data.input_buffer_read_offset != initial_data.input_buffer_read_offset) input_mask |= C::kBitOffset;
++  if (data.error_status != initial_data.error_status) input_mask |= C::kError;
++  if (input_mask) {
++    C::UpdateWord(context_ptr, 2, input_mask, data.input_buffer_read_offset | (uint32_t(data.error_status) << 26));
++  }
++  if (data.current_buffer != initial_data.current_buffer) {
++    C::UpdateWord(context_ptr, 4, C::kCurrentInput, uint32_t(data.current_buffer) << 31);
++  }
++
++  uint32_t mask = C::kOutputWrite;
++  if (data.loop_count != initial_data.loop_count) mask |= C::kLoopCount;
+   if (initial_data.input_buffer_0_valid && !data.input_buffer_0_valid) {
+-    fresh.input_buffer_0_valid = 0;
++    mask |= C::kInput0Valid;
+   }
+   if (initial_data.input_buffer_1_valid && !data.input_buffer_1_valid) {
+-    fresh.input_buffer_1_valid = 0;
+-  }
+-
++    mask |= C::kInput1Valid;
++  }
++  // Release the new PCM and decoder write cursor before announcing a full output ring.
++  // Word 9 is owned by the guest, which may already have consumed part of this work.
++  C::UpdateWord(context_ptr, 0, mask, (uint32_t(data.output_buffer_write_offset) << 27) |
++                                      (uint32_t(data.loop_count) << 12));
+   if (initial_data.output_buffer_valid && !data.output_buffer_valid) {
+-    fresh.output_buffer_valid = 0;
+-  }
+-
+-  fresh.input_buffer_read_offset = data.input_buffer_read_offset;
+-  fresh.error_status = data.error_status;
+-  fresh.current_buffer = data.current_buffer;
+-  fresh.output_buffer_read_offset = data.output_buffer_read_offset;
+-
+-  fresh.Store(context_ptr);
++    C::UpdateWord(context_ptr, 1, C::kOutputValid, 0);
++  }
+ }
+ 
+ uint32_t XmaContext::Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA* data) {
+@@ -928,14 +913,6 @@
+ 
+   input_buffer_.fill(0);
+ 
+-  // Loop-end frame: decode it here (output limited to loop_subframe_end),
+-  // jump to loop_start afterwards in the next-offset step.
+-  bool is_loop_end_frame = false;
+-  if (data->loop_count > 0) {
+-    const uint32_t loop_end = std::max(kBitsPerPacketHeader, data->loop_end);
+-    is_loop_end_frame = (data->input_buffer_read_offset == loop_end);
+-  }
+-
+   if (!data->output_buffer_block_count) {
+     REXAPU_ERROR("XmaContext {}: Error - Received 0 for output_buffer_block_count!", id());
+     return;
+@@ -975,6 +952,13 @@
+     AdvanceInputPacket(data, packet_index + 1);
+     return;
+   }
++
++  // LoopEnd is the exact bit address of an encoded frame. Zero (or any
++  // other bit in a packet header) cannot identify the first audio frame.
++  // Compare after resolving the actual frame, including continuation bits.
++  const uint32_t loop_start = std::max(kBitsPerPacketHeader, data->loop_start);
++  const bool is_loop_end_frame = data->loop_count && data->loop_end == data->input_buffer_read_offset &&
++      (loop_start != data->loop_end || data->loop_subframe_skip <= data->loop_subframe_end);
+ 
+   kPacketInfo packet_info = GetPacketInfo(packet, relative_offset);
+   const uint32_t packet_to_skip = skip_count + 1;
+@@ -1081,7 +1065,9 @@
+ 
+   // Compute where to go next.
+   if (is_loop_end_frame) {
+-    UpdateLoopStatus(data);
++    data->input_buffer_read_offset = loop_start;
++    loop_start_skip_pending_ = true;
++    if (data->loop_count < 255) --data->loop_count;
+     return;
+   }
+ 
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_audio_xma.cpp b/src/kernel/xboxkrnl/xboxkrnl_audio_xma.cpp
+--- a/src/kernel/xboxkrnl/xboxkrnl_audio_xma.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_audio_xma.cpp
+@@ -196,15 +196,12 @@
+ }
+ 
+ u32 XMASetLoopData_entry(mapped_void context_ptr, ppc_ptr_t<XMA_CONTEXT_DATA> loop_data) {
+-  XMA_CONTEXT_DATA context(context_ptr);
+-
+-  context.loop_start = loop_data->loop_start;
+-  context.loop_end = loop_data->loop_end;
+-  context.loop_count = loop_data->loop_count;
+-  context.loop_subframe_end = loop_data->loop_subframe_end;
+-  context.loop_subframe_skip = loop_data->loop_subframe_skip;
+-
+-  context.Store(context_ptr);
++  using C = XMA_CONTEXT_DATA;
++  C::UpdateWord(context_ptr, 3, C::kBitOffset, loop_data->loop_start);
++  C::UpdateWord(context_ptr, 4, C::kBitOffset, loop_data->loop_end);
++  C::UpdateWord(context_ptr, 1, (3u << 12) | (7u << 17),
++                (uint32_t(loop_data->loop_subframe_end) << 12) | (uint32_t(loop_data->loop_subframe_skip) << 17));
++  C::UpdateWord(context_ptr, 0, C::kLoopCount, uint32_t(loop_data->loop_count) << 12);
+ 
+   return 0;
+ }
+@@ -214,9 +211,7 @@
+ }
+ 
+ u32 XMASetInputBufferReadOffset_entry(mapped_void context_ptr, u32 value) {
+-  XMA_CONTEXT_DATA context(context_ptr);
+-  context.input_buffer_read_offset = value;
+-  context.Store(context_ptr);
++  XMA_CONTEXT_DATA::UpdateWord(context_ptr, 2, XMA_CONTEXT_DATA::kBitOffset, value);
+ 
+   return 0;
+ }
+@@ -232,12 +227,8 @@
+     return X_E_FALSE;
+   }
+ 
+-  XMA_CONTEXT_DATA context(context_ptr);
+-
+-  context.input_buffer_0_ptr = buffer_physical_address;
+-  context.input_buffer_0_packet_count = packet_count;
+-
+-  context.Store(context_ptr);
++  XMA_CONTEXT_DATA::UpdateWord(context_ptr, 5, UINT32_MAX, buffer_physical_address);
++  XMA_CONTEXT_DATA::UpdateWord(context_ptr, 0, XMA_CONTEXT_DATA::kPacketCount, packet_count);
+ 
+   return 0;
+ }
+@@ -248,9 +239,7 @@
+ }
+ 
+ u32 XMASetInputBuffer0Valid_entry(mapped_void context_ptr) {
+-  XMA_CONTEXT_DATA context(context_ptr);
+-  context.input_buffer_0_valid = 1;
+-  context.Store(context_ptr);
++  XMA_CONTEXT_DATA::UpdateWord(context_ptr, 0, XMA_CONTEXT_DATA::kInput0Valid, XMA_CONTEXT_DATA::kInput0Valid);
+ 
+   return 0;
+ }
+@@ -266,12 +255,8 @@
+     return X_E_FALSE;
+   }
+ 
+-  XMA_CONTEXT_DATA context(context_ptr);
+-
+-  context.input_buffer_1_ptr = buffer_physical_address;
+-  context.input_buffer_1_packet_count = packet_count;
+-
+-  context.Store(context_ptr);
++  XMA_CONTEXT_DATA::UpdateWord(context_ptr, 6, UINT32_MAX, buffer_physical_address);
++  XMA_CONTEXT_DATA::UpdateWord(context_ptr, 1, XMA_CONTEXT_DATA::kPacketCount, packet_count);
+ 
+   return 0;
+ }
+@@ -281,9 +266,7 @@
+ }
+ 
+ u32 XMASetInputBuffer1Valid_entry(mapped_void context_ptr) {
+-  XMA_CONTEXT_DATA context(context_ptr);
+-  context.input_buffer_1_valid = 1;
+-  context.Store(context_ptr);
++  XMA_CONTEXT_DATA::UpdateWord(context_ptr, 0, XMA_CONTEXT_DATA::kInput1Valid, XMA_CONTEXT_DATA::kInput1Valid);
+ 
+   return 0;
+ }
+@@ -293,9 +276,7 @@
+ }
+ 
+ u32 XMASetOutputBufferValid_entry(mapped_void context_ptr) {
+-  XMA_CONTEXT_DATA context(context_ptr);
+-  context.output_buffer_valid = 1;
+-  context.Store(context_ptr);
++  XMA_CONTEXT_DATA::UpdateWord(context_ptr, 1, XMA_CONTEXT_DATA::kOutputValid, XMA_CONTEXT_DATA::kOutputValid);
+ 
+   return 0;
+ }
+@@ -441,9 +422,7 @@
+ }
+ 
+ u32 XMASetOutputBufferReadOffset_entry(mapped_void context_ptr, u32 value) {
+-  XMA_CONTEXT_DATA context(context_ptr);
+-  context.output_buffer_read_offset = value;
+-  context.Store(context_ptr);
++  XMA_CONTEXT_DATA::UpdateWord(context_ptr, kXmaReadOffsetWord, XMA_CONTEXT_DATA::kOutputRead, value);
+ 
+   return 0;
+ }

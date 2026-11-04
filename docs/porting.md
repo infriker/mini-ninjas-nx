@@ -32,6 +32,12 @@ NFSMW-NX. Those attributions are retained in the installer notices.
 - Keep active audio callbacks alive during client teardown and reject late
   submissions to a removed driver. This prevents a null-driver crash when
   skipping the opening movie before its audio callback finishes.
+- Respect XMA loop endpoints only when they identify encoded audio frames.
+  A loop endpoint inside the packet header could repeat the first frame
+  indefinitely during the opening cutscene of level two, Leaving Home.
+- Publish decoder and game-owned buffer positions independently, so a decoder
+  update preserves the game's read position. Wake the audio worker as soon
+  as a client returns after a period of silence.
 
 ## Rendering
 
