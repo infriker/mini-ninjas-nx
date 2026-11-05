@@ -36,6 +36,10 @@ Supported `default.xex`: 7,712,768 bytes, Title ID `534307E4`, SHA-256:
 
 ## Updates and saves
 
+For v1.0.7, an existing v1.0.3–v1.0.6 or v1.0.7-rc.1/rc.2 installation needs
+only the new `mini-ninjas.nro`. The runtime package is the same as v1.0.6;
+existing game files, configuration, saves and shader cache can be reused.
+
 Close the game before replacing files. The installer's update package replaces
 the port NRO, supplied shader package, default settings and notices without copying the game
 again. It does not include save files. Keep the existing game data, save

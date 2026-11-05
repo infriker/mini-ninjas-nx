@@ -64,6 +64,29 @@ scene mode enabled. The output is `build/switch/mini-ninjas.nro`. Compiler,
 dependency or platform differences can change the resulting binary hash; a
 successful build alone does not establish visual correctness or performance.
 
+Version 1.0.7 enables deferred colour/depth clears, useful-row clears,
+duplicate-clear elimination, compatible full depth image swaps and deferred
+single-sample front-buffer copies. Resolution and native 4x MSAA are unchanged.
+The depth swap requires a following clear; mismatched formats, partial depth
+resolves and MSAA resolves retain the copy path. A front-buffer snapshot stays
+valid after presentation: a later read or source write materializes its copy,
+while a complete replacement can discard it. This conservative lifetime rule
+means front-buffer savings depend on the game's actual pass ordering.
+
+It also enables early depth tests for compatible effects
+with no depth/stencil writes, and skips the regular fragment shader when no
+colour is written and neither alpha testing, shader discard nor shader depth
+output requires it. These use the SDK's guarded paths alongside the clear/copy
+changes. Run `python3 tools/test_gpu_shader_guards.py` to check the actual
+shader-selection guards before a console comparison.
+
+Run `python3 tools/test_gpu_targets.py` after preparing the SDK for CPU image
+tests of the actual clear and snapshot control flow (requires a host C++
+compiler with AddressSanitizer and UBSan). This does not validate deko3d
+commands or establish a console FPS improvement. The published 1.0.7 has the
+same executable code as the Switch-tested 1.0.7-rc.2, with only the NACP display
+version changed. Modified builds still require console testing.
+
 ### CPU builds and on-console profiling
 
 The release build uses bounded GCC LTO on the translated game functions. Set

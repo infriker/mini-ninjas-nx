@@ -231,19 +231,26 @@ class RingGraphicsSystem final : public rex::system::IGraphicsSystem {
     REXCVAR_SET(deko_resolver_cuatro_franjas, true);
     REXCVAR_SET(nfsmw_nativo_ps_solo_alfa, false);
     REXCVAR_SET(nfsmw_nativo_saltar_invisibles, false);
-    REXCVAR_SET(nfsmw_nativo_sin_ps_sin_color, false);
+    // Skip the regular fragment shader only when there are no colour writes,
+    // alpha test, shader discard or shader depth output.
+    REXCVAR_SET(nfsmw_nativo_sin_ps_sin_color, true);
     REXCVAR_SET(nfsmw_nativo_sin_desenfoque, false);
     REXCVAR_SET(nfsmw_nativo_pcf_barato, false);
-    REXCVAR_SET(nfsmw_nativo_z_temprana, false);
+    // Early depth tests for compatible effects without depth/stencil writes.
+    REXCVAR_SET(nfsmw_nativo_z_temprana, true);
     REXCVAR_SET(nfsmw_nativo_cielo_aplazado, false);
     REXCVAR_SET(nfsmw_nativo_sombra_minimo, false);
-    REXCVAR_SET(nfsmw_nativo_saltar_borrados_repetidos, false);
-    REXCVAR_SET(nfsmw_nativo_resolver_sin_copia, false);
+    // GPU bandwidth: defer/coalesce clears and only clear rows reached by a draw
+    // or resolve. The SDK completes any newly reached rows before they are used.
+    REXCVAR_SET(nfsmw_nativo_saltar_borrados_repetidos, true);
+    REXCVAR_SET(nfsmw_dk_borrar_area_util, true);
+    REXCVAR_SET(nfsmw_dk_borrado_color_aplazado, true);
+    REXCVAR_SET(nfsmw_dk_borrado_z_aplazado, true);
+    // Elide compatible full depth copies and defer a compatible 1x front copy.
+    // Keep the restore-on-write depth shortcut off; 4x MSAA still resolves.
+    REXCVAR_SET(nfsmw_nativo_resolver_sin_copia, true);
     REXCVAR_SET(nfsmw_nativo_intercambiar_sin_borrado, false);
-    REXCVAR_SET(nfsmw_nativo_frontal_perezoso, false);
-    REXCVAR_SET(nfsmw_dk_borrar_area_util, false);
-    REXCVAR_SET(nfsmw_dk_borrado_color_aplazado, false);
-    REXCVAR_SET(nfsmw_dk_borrado_z_aplazado, false);
+    REXCVAR_SET(nfsmw_nativo_frontal_perezoso, true);
     REXCVAR_SET(nfsmw_dk_geometria_muestreo, false);
     REXCVAR_SET(deko_perfil_cpu_dibujos, false);
     if (rex::cvar::GetFlagSource("deko_partial_submit_draws") == rex::cvar::Source::kDefault) {

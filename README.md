@@ -38,20 +38,21 @@ provide enough memory. The Windows PC version is not supported.
     ...
 ```
 
-To update a v1.0.3, v1.0.4 or v1.0.5 installation, replace
+To update a v1.0.3–v1.0.6 or v1.0.7 release-candidate installation, replace
 `sdmc:/switch/mini-ninjas/mini-ninjas.nro` with the NRO from the
 [latest release](https://github.com/infriker/mini-ninjas-nx/releases/latest).
 For manual installation and save locations, see [installation](docs/installing.md).
 
 ## Performance
 
-The v1.0.6 release uses a new CPU profile from a Switch playthrough into
-the second level. Audio workers can sleep while waiting for each other, and
-frequently executed game routines keep PowerPC register values in host registers.
-Both changes are enabled by default. The renderer submits work to the GPU
-every 128 guest draws by default.
-See [performance](docs/performance.md#v106-gameplay-profile) for the profile
-coverage, optimization methods and individual controls.
+The v1.0.7 release reduces GPU work with deferred and useful-area render-target
+clears, compatible resolve/copy elimination, early depth tests for suitable
+effects, and removal of unnecessary fragment-shader work in eligible passes.
+It retains 1280×720, hardware 4× MSAA and the v1.0.6 CPU optimizations.
+The release candidate was tested on Switch with smoother gameplay and no
+visual artifacts reported. See [GPU optimizations](docs/performance.md#v107-gpu-optimizations)
+for the conditions and validation, and [CPU profile](docs/performance.md#v106-gameplay-profile)
+for the existing PGO/LTO improvements. Gameplay profiling remains disabled.
 
 On Nintendo Switch, gameplay runs at **25–30 FPS at stock clocks**, depending
 on the scene. For a stable **30 FPS**, set the CPU to **1224 MHz** and keep

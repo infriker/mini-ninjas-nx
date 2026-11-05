@@ -9,6 +9,46 @@
 Set the clocks on the console. To change the frame limit, edit
 `minininjas.toml` beside the NRO and restart the game.
 
+## v1.0.7 GPU optimizations
+
+Version 1.0.7 enables four groups of renderer optimizations at 1280×720 with
+hardware 4× MSAA:
+
+| Optimization | When it applies |
+|---|---|
+| Deferred and useful-area clears | Colour/depth clears are delayed until needed; repeated identical clears can be skipped, and newly used rows are cleared before being read or written. |
+| Resolve/copy elimination | A complete compatible single-sample depth resolve followed by a clear can swap images. A compatible single-sample front-buffer copy can remain deferred until needed. |
+| Early depth tests | Eligible alpha-tested or discarding effects test depth before shading when they do not write depth and stencil is disabled. |
+| Less fragment-shader work | A pass with no colour writes, active alpha test, shader discard or shader depth output can use the backend's minimal empty fragment shader. |
+
+These enable `nfsmw_dk_borrar_area_util`, `nfsmw_dk_borrado_color_aplazado`,
+`nfsmw_dk_borrado_z_aplazado`, `nfsmw_nativo_saltar_borrados_repetidos`,
+`nfsmw_nativo_resolver_sin_copia`, `nfsmw_nativo_frontal_perezoso`,
+`nfsmw_nativo_z_temprana` and `nfsmw_nativo_sin_ps_sin_color`.
+
+Ordinary MSAA resolves, format conversions and partial depth resolves keep
+their required copies. A deferred front-buffer snapshot remains valid after
+presentation: a later read or source modification materializes it, and a
+complete replacement can discard the old snapshot. Actual copy savings depend
+on the game's pass ordering.
+
+The SDK patch also invalidates duplicate-clear state after copies and fast
+clears, completes a pending clear before partial writes into previously unused
+rows, and preserves the original whole-clear value outside a partial clear.
+Colour resolves track native 4× MSAA extents in sample rows.
+
+The final candidate, 1.0.7-rc.2, was tested on Nintendo Switch. Smoother gameplay
+and no visual artifacts were reported; the additional FPS gain was not measured.
+The stable release contains identical executable code, with only the displayed
+version updated. CPU image tests cover clear/snapshot lifetimes and copy guards;
+shader-selection tests cover colour masks, alpha/depth comparisons, discard,
+depth/stencil writes and GLSL declaration order. The supplied library's 58 pixel
+shaders were checked for storage/image/atomic side effects and sample-mask outputs.
+
+The v1.0.6 PGO profile, LTO, CPU optimizations and default Partial Submit interval
+remain in use. Gameplay builds contain no PGO recording code, CPU stack sampler,
+service timing wrappers, per-draw CPU/GPU timing or Partial Submit reports.
+
 ## v1.0.6 gameplay profile
 
 The change from v1.0.5 is the input to GCC's profile-guided optimization

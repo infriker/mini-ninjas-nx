@@ -1,0 +1,162 @@
+diff --git a/src/x360/deko/destinos.cpp b/src/x360/deko/destinos.cpp
+--- a/src/x360/deko/destinos.cpp
++++ b/src/x360/deko/destinos.cpp
+@@ -915,6 +915,13 @@
+ 
+ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32_t ancho, uint32_t alto,
+                         ImagenDk& destino, uint32_t dx, uint32_t dy, int32_t modo, float escala, uint32_t muestras) {
++  // Copies can modify a render target without advancing the guest draw count.
++  // Preserve a deferred front snapshot and finish its logical clear first, so
++  // a later band clear cannot erase the newly copied pixels.
++  AntesDeCambiarDestino(&destino);
++  CompletarBanda(destino, dy + alto, false, 0);
++  HacerBorradoPendiente(destino);
++  borrado_previo_.erase(destino.serie);
+   // A 4x resolve whose rows the companion holds newer (a 4x pass drew them): read there, not unpacked first. Halo 3's
+   // menu resolves each tile after drawing it; each one unpacked every row drawn so far (about 36 a frame).
+   const ImagenDk* ms_origen = nullptr;
+@@ -1078,10 +1085,16 @@
+   MarcarGpu(kGpuSubBorradoRapido);
+   for (uint32_t i = 0; i < n; ++i) {
+     ImagenDk& imagen = *imagenes[i];
++    // Fast clear draws bypass dibujados_; the old resolve clear is no longer
++    // proof that this image still contains the same value.
++    borrado_previo_.erase(imagen.serie);
+     uint32_t cubre_x = 0, cubre_y = 0;  // the largest rectangle from (0, 0)
++    uint32_t hasta_escritura = 0;
+     for (uint32_t v = 0; v + 2 < cuenta; v += 3) {
+       const float xs[3] = {valor(v * kZancada), valor((v + 1) * kZancada), valor((v + 2) * kZancada)};
+       const float ys[3] = {valor(v * kZancada + 1), valor((v + 1) * kZancada + 1), valor((v + 2) * kZancada + 1)};
++      hasta_escritura = std::max(hasta_escritura, uint32_t(std::clamp(
++          std::floor(std::max({ys[0], ys[1], ys[2]}) + 0.5f) * float(por_y), 0.0f, float(imagen.alto))));
+       if (std::floor(std::min({xs[0], xs[1], xs[2]}) + 0.5f) <= 0.0f &&
+           std::floor(std::min({ys[0], ys[1], ys[2]}) + 0.5f) <= 0.0f) {
+         cubre_x = std::max(cubre_x, uint32_t(std::max(0.0f, std::floor(std::max({xs[0], xs[1], xs[2]}) + 0.5f))) * por_x);
+@@ -1098,6 +1111,10 @@
+       ++borrados_rapidos_aplazados_;
+       continue;
+     }
++    AntesDeCambiarDestino(&imagen);
++    // Complete the previous whole clear before a partial write reaches its
++    // deferred band, otherwise a later draw would clear these new pixels.
++    CompletarBanda(imagen, hasta_escritura, false, 0);
+     HacerBorradoPendiente(imagen);
+     // A 4x surface whose companion holds the newer copy (a 4x pass drew it): cleared there, its rows still the
+     // companion's. Unpacking it first, then the next 4x pass packing it back, cost 8 ms a frame in Halo 3's menu,
+@@ -1142,7 +1159,8 @@
+         imagen.ms_filas = std::max(imagen.ms_filas, uint32_t(y1));  // unpacked with the rest when read
+       }
+     }
+-    std::memcpy(imagen.borrado_color, color, sizeof(color));
++    // A partial fast clear does not change the value of the earlier whole
++    // clear in rows deferred by CompletarBanda.
+   }
+   ++borrados_rapidos_;
+   rop_sin_barrera_ = true;
+@@ -1594,6 +1612,7 @@
+   HacerBorradoPendiente(origen);
+   const uint32_t alto = std::min(origen.alto, std::max(origen.alto_usado, destino.alto_usado) ? std::max(origen.alto_usado, destino.alto_usado) : origen.alto);
+   const uint32_t ancho = std::min(origen.ancho, destino.ancho);
++  CompletarBanda(origen, alto, false, 0);
+   if (Copiar3D(origen, 0, 0, ancho, alto, destino, 0, 0, modo, 1.0f)) {
+     destino.formato_dibujo = modo == kCopia8888A7e3 ? uint8_t(formato_destino) : origen.formato_dibujo;
+     destino.alto_usado = std::max(destino.alto_usado, alto);
+@@ -1678,7 +1697,7 @@
+     // Another size or format at the same address: the current one is kept aside (resueltas_otras_), and one of the
+     // new size kept from before comes back, so the two a frame alternates are not recreated every time.
+     if (frontal_.pendiente && frontal_.resuelta == &r) {
+-      frontal_.pendiente = false;  // its texture moves: nothing to copy into
++      MaterializarFrontal();  // the old size may be sampled again from resueltas_otras_
+     }
+     const bool era_profundidad = r.imagen.formato == DkImageFormat_Z24S8;
+     const uint64_t aparte = ClaveOtra(base, r.imagen.ancho, r.imagen.alto, era_profundidad);
+@@ -1723,15 +1742,6 @@
+ const ImagenDk* RenderDk::TexturaResuelta(uint32_t direccion) {
+   if (frontal_.pendiente && direccion == frontal_.base) {
+     MaterializarFrontal();  // a draw samples the front buffer: it gets the copy now
+-  } else if (frontal_obsoleta_ && direccion == frontal_obsoleta_) {
+-    // Painted from its target and sampled afterwards: the texture holds an older frame. Copies from now on.
+-    frontal_obsoleta_ = 0;
+-    if (!frontal_apagado_) {
+-      frontal_apagado_ = true;
+-      REXLOG_WARN("[deko3d] frontal perezoso: un dibujo muestrea el frontal {:08X} despues del Swap; se copia siempre "
+-                  "a partir de ahora",
+-                  direccion);
+-    }
+   }
+   const auto it = resueltas_.find(direccion);
+   if (it == resueltas_.end() || !it->second.escrita) {
+@@ -2020,14 +2030,27 @@
+       const int32_t modo_copia = bits_7e3 ? kCopia7e3 : desde_7e3 ? kCopia8888A7e3 : kCopiaValor;
+       const bool transforma = bits_7e3 || desde_7e3 || sesgo != 0;
+       static const bool frontal_perezoso = REXCVAR_GET(nfsmw_nativo_frontal_perezoso);
+-      const bool frontal = frontal_perezoso && !frontal_apagado_ && base_resuelta == ultimo_frontal_ && !encoger &&
+-                           !transforma &&
++      const bool frontal = frontal_perezoso && muestras == 1 && base_resuelta &&
++                           base_resuelta == ultimo_frontal_ && !encoger && !transforma &&
++                           destino_render->formato == resuelta->imagen.formato &&
++                           destino_render->intercambio_rb == resuelta->imagen.intercambio_rb &&
+                            !se_lee && x0 == 0 && y0 == 0 && dx == 0 && dy == 0 && ancho == resuelta->imagen.ancho &&
+                            alto == resuelta->imagen.alto;
++      if (frontal_.pendiente && frontal_.resuelta == resuelta) {
++        // A complete replacement makes the previous snapshot unnecessary. A
++        // partial resolve must preserve the previous pixels outside its rect.
++        if (dx == 0 && dy == 0 && ancho == resuelta->imagen.ancho && alto == resuelta->imagen.alto &&
++            (uint64_t(x0) + ancho) * muestras <= destino_render->ancho &&
++            (uint64_t(y0) + alto) * muestras <= destino_render->alto) {
++          frontal_.pendiente = false;
++        } else {
++          MaterializarFrontal();
++        }
++      }
+       // What the resolve reads must be there: the useful area grows to it, a pending clear is done, the band too.
+       if (y1 > 0) {
+         destino_render->alto_usado =
+-            std::max(destino_render->alto_usado, std::min(uint32_t(y1), destino_render->alto));
++            std::max(destino_render->alto_usado, std::min(uint32_t(y1) * muestras, destino_render->alto));
+       }
+       HacerBorradoPendiente(*destino_render);
+       CompletarBanda(*destino_render, uint32_t(std::max(y1, 0)) * muestras, false, 0);
+@@ -2070,7 +2093,6 @@
+           MaterializarFrontal();
+         }
+         frontal_ = {true, base_resuelta, destino_render, resuelta, ancho, alto};
+-        frontal_obsoleta_ = 0;
+         resuelta->escrita = true;
+         ++resuelta->imagen.version;
+         SombraMinimoResueltaEscrita(base_resuelta);
+@@ -3166,10 +3188,10 @@
+         if (hooks_.Fxaa() || contexto.ancho() != w || contexto.alto() != h) {
+           MaterializarFrontal();
+           fuente = TexturaResuelta(base);
+-        } else {
+-          frontal_.pendiente = false;
+-          frontal_obsoleta_ = base;
+         }
++        // Presentation does not end the resolved texture's lifetime. Keep the
++        // snapshot pending until it is sampled, its source changes, or a newer
++        // full resolve replaces it. A late read must never see an older frame.
+       }
+       pintado = fuente && PintarSalida(contexto.imagen(), contexto.ancho(), contexto.alto(), *fuente, w, h);
+       CerrarTrabajo();  // submitted before returning, as RefreshGuestOutput requires
+@@ -3799,7 +3821,7 @@
+       double(copias_3d_ - informe_copias_3d_) / fotogramas,
+       double(barreras_fragmentos_ - informe_barreras_fragmentos_) / fotogramas,
+       double(frontales_ahorrados_ - informe_frontales_) / fotogramas, frontales_copiados_,
+-      frontal_apagado_ ? "APAGADO por una lectura tardia" : "activo", double(bandas_completadas_ - informe_bandas_) / fotogramas,
++      "activo", double(bandas_completadas_ - informe_bandas_) / fotogramas,
+       dibujos ? double(registros_empujados_ - informe_registros_empujados_) / double(dibujos) : 0.0,
+       dibujos ? double(empujes_ - informe_empujes_) / double(dibujos) : 0.0);
+   X360_INFORME(
+diff --git a/include/rex/x360/deko/render.h b/include/rex/x360/deko/render.h
+--- a/include/rex/x360/deko/render.h
++++ b/include/rex/x360/deko/render.h
+@@ -326,8 +326,6 @@
+     uint32_t ancho = 0, alto = 0;
+   } frontal_;
+   uint32_t ultimo_frontal_ = 0;       // the front buffer of the last Swap
+-  uint32_t frontal_obsoleta_ = 0;     // painted from its target: the texture itself was not written
+-  bool frontal_apagado_ = false;      // a late read showed up: copies from then on
+   uint64_t frontales_ahorrados_ = 0, frontales_copiados_ = 0, bandas_completadas_ = 0;
+   void MaterializarFrontal();
+   // Before a target's content changes (a pass binds it, a clear, a band): the pending front copy from it is made.
