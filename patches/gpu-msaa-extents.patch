@@ -1,0 +1,531 @@
+--- a/src/x360/deko/destinos.cpp
++++ b/src/x360/deko/destinos.cpp
+@@ -27,6 +27,7 @@
+ #include <rex/x360/deko/storage_buffer_eden.h>
+ #include <rex/x360/xenos.h>
+ #include <rex/x360/deko/minininjas_full_frame.h>
++#include <rex/x360/deko/target_extent.h>
+ 
+ // Settings of the renderer that the game hooks also read (nfsmw_nativo_ganchos.cpp). The Vulkan build defines them
+ // in nfsmw_nativo_dibujos.cpp, which this build leaves out: same names, types and defaults.
+@@ -60,6 +61,9 @@
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ REXCVAR_DEFINE_INT32(deko_altura_minima_destino, 720, "deko3d",
+                      "Minimum render-target height in sample-space pixels; titles may raise it for tall MSAA tiles")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_BOOL(deko_altura_destino_ajustada, false, "deko3d",
++                    "Allocate render targets by requested rows and preserve their contents when growing")
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ REXCVAR_DEFINE_BOOL(deko_resolver_cuatro_franjas, false, "deko3d",
+                     "Combine only verified four-strip horizontal 4x resolve sequences")
+@@ -465,7 +469,15 @@
+ }
+ )";
+ constexpr const char* kFsCopiaProfundidad = R"(#version 460
++#ifdef COPIAR_ESTENCIL
++#extension GL_ARB_shader_stencil_export : require
++layout(binding = 1) uniform usampler2D estencil;
++#endif
++#ifdef ORIGEN_MS
++layout(binding = 0) uniform sampler2DMS origen;
++#else
+ layout(binding = 0) uniform sampler2D origen;
++#endif
+ layout(std140, binding = 0) uniform Copia {
+   ivec4 desplazamiento;  // xy: source minus destination, in pixels; z: samples per pixel along each axis (0 or 1: none)
+ } copia;
+@@ -473,7 +485,17 @@
+   // A 4x MSAA source is in sample space: a pixel's depth is its sample 0, the top-left of its 2x2 (as the console
+   // resolves Halo 3's menu G-buffer depth; averaging would make in-between depths along every silhouette).
+   ivec2 fuente = ivec2(gl_FragCoord.xy) + copia.desplazamiento.xy;
++#ifdef ORIGEN_MS
++  // Same sample zero as unpacking the 2x2 grid then fetching its top-left.
++  // Resolves leave destination stencil unchanged, just like the original path.
++  gl_FragDepth = texelFetch(origen, fuente, 0).r;
++#else
+   gl_FragDepth = texelFetch(origen, fuente * max(copia.desplazamiento.z, 1), 0).r;
++#endif
++#ifdef COPIAR_ESTENCIL
++  // Storage growth is a lossless 1x copy, not a guest resolve.
++  gl_FragStencilRefARB = int(texelFetch(estencil, fuente, 0).r);
++#endif
+ }
+ )";
+ 
+@@ -914,7 +936,8 @@
+ }
+ 
+ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32_t ancho, uint32_t alto,
+-                        ImagenDk& destino, uint32_t dx, uint32_t dy, int32_t modo, float escala, uint32_t muestras) {
++                        ImagenDk& destino, uint32_t dx, uint32_t dy, int32_t modo, float escala, uint32_t muestras,
++                        bool copiar_estencil) {
+   // Copies can modify a render target without advancing the guest draw count.
+   // Preserve a deferred front snapshot and finish its logical clear first, so
+   // a later band clear cannot erase the newly copied pixels.
+@@ -925,10 +948,15 @@
+   // A 4x resolve whose rows the companion holds newer (a 4x pass drew them): read there, not unpacked first. Halo 3's
+   // menu resolves each tile after drawing it; each one unpacked every row drawn so far (about 36 a frame).
+   const ImagenDk* ms_origen = nullptr;
+-  if (muestras > 1 && !destino.profundidad && fs_copia_color_ms_valido_ && origen.ms_nueva &&
+-      y0 + alto * muestras <= origen.ms_filas) {
++  const bool z = destino.profundidad;
++  if (!copiar_estencil && (z ? fs_copia_profundidad_ms_valido_ : fs_copia_color_ms_valido_) &&
++      origen.profundidad == z && origen.ms_nueva && !origen.s_nueva &&
++      !origen.borrado_pendiente && !origen.contenido_invalido &&
++      target_extent::Direct4x(z, muestras, x0, y0, ancho, alto, origen.ancho, origen.ms_filas)) {
+     auto it = ms_de_.find(origen.serie);
+-    if (it != ms_de_.end() && it->second.viva) {
++    if (it != ms_de_.end() && it->second.viva && it->second.tipo == DkImageType_2DMS &&
++        it->second.ancho * 2 == origen.ancho && it->second.alto * 2 == origen.alto &&
++        it->second.formato == origen.formato) {
+       ms_origen = &it->second;
+       ++ms_resueltas_directas_;
+     }
+@@ -937,8 +965,8 @@
+     LeerMuestras(const_cast<ImagenDk&>(origen));
+   }
+   EscribirMuestras(destino);
+-  const bool z = destino.profundidad;
+-  if (!vs_salida_valido_ || !(z ? fs_copia_profundidad_valido_ : fs_copia_color_valido_)) {
++  if (!vs_salida_valido_ || !(z ? (copiar_estencil ? fs_copia_zs_valido_ : fs_copia_profundidad_valido_)
++                                : fs_copia_color_valido_)) {
+     return false;
+   }
+   AsegurarTrabajo();
+@@ -958,7 +986,9 @@
+   std::memcpy(ubo.cpu, desplazamiento, sizeof(desplazamiento));
+   std::memcpy(ubo.cpu + 16, modos, sizeof(modos));
+   std::memcpy(ubo.cpu + 32, escalas, sizeof(escalas));
+-  const uint32_t ranura = ms_origen ? VistaDe(*ms_origen, 0x688, 0x688) : VistaDe(origen, 0x688, z ? 0 /* RRRR */ : 0x688);
++  const uint32_t ranura = VistaDe(ms_origen ? *ms_origen : origen, 0x688, z ? 0 /* RRRR */ : 0x688);
++  const uint32_t ranura_estencil = copiar_estencil ? VistaEstencil(origen) : 0;
++  if (!ranura || (copiar_estencil && !ranura_estencil)) return false;
+   DkCmdBuf cmd = nucleo_.comandos();
+   MarcarGpu(kGpuCopias);
+   if (transferencia_sin_barrera_) {
+@@ -1005,21 +1035,25 @@
+   ds.depthTestEnable = z;
+   ds.depthWriteEnable = z;
+   ds.depthCompareOp = DkCompareOp_Always;
+-  ds.stencilTestEnable = false;
++  ds.stencilTestEnable = z && copiar_estencil;
+   dkCmdBufBindRasterizerState(cmd, &rs);
+   dkCmdBufBindColorState(cmd, &cs);
+   dkCmdBufBindColorWriteState(cmd, &cws);
+   dkCmdBufBindDepthStencilState(cmd, &ds);
++  if (z && copiar_estencil) dkCmdBufSetStencil(cmd, DkFace_FrontAndBack, 0xFF, 0x00, 0xFF);
+   dkCmdBufBindVtxAttribState(cmd, nullptr, 0);
+   dkCmdBufBindVtxBufferState(cmd, nullptr, 0);
+   const DkShader* shaders[2] = {&vs_salida_,
+-                                z ? &fs_copia_profundidad_ : ms_origen ? &fs_copia_color_ms_ : &fs_copia_color_};
++                                z ? (copiar_estencil ? &fs_copia_zs_ : ms_origen ? &fs_copia_profundidad_ms_ : &fs_copia_profundidad_)
++                                  : ms_origen ? &fs_copia_color_ms_ : &fs_copia_color_};
+   dkCmdBufBindShaders(cmd, DkStageFlag_GraphicsMask, shaders, 2);
+   dkCmdBufBindUniformBuffer(cmd, DkStage_Fragment, 0, ubo.gpu, 256);
+   dkCmdBufBindTexture(cmd, DkStage_Fragment, 0, dkMakeTextureHandle(ranura, 0));
++  if (copiar_estencil) dkCmdBufBindTexture(cmd, DkStage_Fragment, 1, dkMakeTextureHandle(ranura_estencil, 0));
+   dkCmdBufDraw(cmd, DkPrimitive_Triangles, 3, 1, 0, 0);
+   ++copias_3d_;
+   copia3d_pendiente_ = true;
++  invalidar_zcull_ |= z;
+   trabajo_3d_sin_barrera_ = true;  // for a copy engine transfer that comes next
+   OlvidarEstado();
+   return true;
+@@ -1094,7 +1128,7 @@
+       const float xs[3] = {valor(v * kZancada), valor((v + 1) * kZancada), valor((v + 2) * kZancada)};
+       const float ys[3] = {valor(v * kZancada + 1), valor((v + 1) * kZancada + 1), valor((v + 2) * kZancada + 1)};
+       hasta_escritura = std::max(hasta_escritura, uint32_t(std::clamp(
+-          std::floor(std::max({ys[0], ys[1], ys[2]}) + 0.5f) * float(por_y), 0.0f, float(imagen.alto))));
++          std::floor(std::max({ys[0], ys[1], ys[2]}) + 0.5f) * float(por_y), 0.0f, 2048.0f)));
+       if (std::floor(std::min({xs[0], xs[1], xs[2]}) + 0.5f) <= 0.0f &&
+           std::floor(std::min({ys[0], ys[1], ys[2]}) + 0.5f) <= 0.0f) {
+         cubre_x = std::max(cubre_x, uint32_t(std::max(0.0f, std::floor(std::max({xs[0], xs[1], xs[2]}) + 0.5f))) * por_x);
+@@ -1104,13 +1138,15 @@
+     // A clear of the whole image: pending, as a resolve's clear (HacerBorradoPendiente), done when the image is next
+     // bound (on its 4x companion if the pass is 4x) and only over the rows in use, the rest as draws or reads reach
+     // them (CompletarBanda). Halo 3's menu clears its whole 4x surface for each 160-row tile.
+-    if (cubre_x + 80 >= imagen.ancho && cubre_y >= imagen.alto) {
++    if (cubre_x + 80 >= imagen.ancho && cubre_y >= (imagen.alto_logico ? imagen.alto_logico : imagen.alto)) {
+       std::memcpy(imagen.borrado_color, color, sizeof(color));
+       imagen.borrado_pendiente = true;
+       g_.pase_valido = false;  // the next draw binds its targets again, which does the clear
+       ++borrados_rapidos_aplazados_;
+       continue;
+     }
++    if (!AsegurarAlturaDestino(imagen, hasta_escritura)) return false;
++    AntesDe3D();  // growth may have recorded a 3D copy
+     AntesDeCambiarDestino(&imagen);
+     // Complete the previous whole clear before a partial write reaches its
+     // deferred band, otherwise a later draw would clear these new pixels.
+@@ -1514,8 +1550,73 @@
+   OlvidarEstado();
+ }
+ 
++bool RenderDk::AlturaAjustada() const {
++  return REXCVAR_GET(deko_altura_destino_ajustada) && !REXCVAR_GET(deko_edram_baldosas) &&
++         vs_salida_valido_ && fs_copia_color_valido_ && fs_copia_zs_valido_;
++}
++
++uint32_t RenderDk::AlturaDestino(uint32_t pitch, uint32_t requerida, bool ajustar) const {
++  if (ajustar && AlturaAjustada()) return target_extent::Height(requerida);
++  const uint32_t minimo = uint32_t(std::clamp(REXCVAR_GET(deko_altura_minima_destino), 720, int32_t(kAltoMaximoDestino)));
++  return std::min(kAltoMaximoDestino, std::max(minimo, (pitch + 15) & ~15u));
++}
++
++bool RenderDk::AsegurarAlturaDestino(ImagenDk& imagen, uint32_t requerida) {
++  if (!AlturaAjustada() || requerida <= imagen.alto) return true;
++  const uint32_t alto = target_extent::Height(requerida);
++  if (alto <= imagen.alto) return true;
++  // Allocate first: failure must leave the live target and deferred snapshot intact.
++  ImagenDk nueva;
++  uint32_t flags = DkImageFlags_UsageRender | (imagen.profundidad ? 0u : DkImageFlags_Usage2DEngine);
++  if (imagen.profundidad ? REXCVAR_GET(nfsmw_dk_compresion_profundidad) : REXCVAR_GET(nfsmw_dk_compresion_color)) {
++    flags |= DkImageFlags_HwCompression;
++  }
++  if (!CrearImagen(nueva, DkImageType_2D, imagen.formato, imagen.ancho, alto, 1, 1, flags, "ampliar destino")) {
++    return false;
++  }
++  AntesDeCambiarDestino(&imagen);
++  TerminarPase();
++  RestaurarContenido(imagen, true);
++  HacerBorradoPendiente(imagen);
++  CompletarBanda(imagen, imagen.alto, false, 0);
++  LeerMuestras(imagen);  // preserve every old depth/stencil sample before retiring the companion
++  AsegurarTrabajo();
++  AntesDe3D();
++  const DkImageView vista = VistaCompleta(nueva.imagen);
++  if (nueva.profundidad) dkCmdBufBindRenderTargets(nucleo_.comandos(), nullptr, 0, &vista);
++  else dkCmdBufBindRenderTarget(nucleo_.comandos(), &vista, nullptr);
++  // Unallocated rows have never been drawn; their value is the last logical whole clear.
++  nueva.borrado_z = imagen.borrado_z;
++  nueva.borrado_estencil = imagen.borrado_estencil;
++  std::copy(std::begin(imagen.borrado_color), std::end(imagen.borrado_color), nueva.borrado_color);
++  BorrarFilas(nueva, 0, 0, alto);
++  if (!Copiar3D(imagen, 0, 0, imagen.ancho, imagen.alto, nueva, 0, 0, kCopiaValor, 1.0f, 1,
++                imagen.profundidad)) {
++    DestruirImagen(nueva);
++    OlvidarEstado();
++    return false;
++  }
++  ImagenDk vieja = imagen;
++  borrado_previo_.erase(imagen.serie);
++  imagen.imagen = nueva.imagen;
++  imagen.memoria = nueva.memoria;
++  imagen.serie = nueva.serie;
++  imagen.alto = alto;
++  imagen.alto_borrado = alto;
++  imagen.banda_sucia = false;
++  imagen.borrado_pendiente = false;
++  imagen.ms_nueva = false;
++  imagen.ms_ligada = false;
++  imagen.ms_filas = 0;
++  imagen.s_nueva = true;
++  ++generacion_texturas_;
++  DestruirImagen(vieja);  // deferred retirement keeps already submitted GPU work valid
++  OlvidarEstado();
++  return true;
++}
++
+ // The image for a base in one format (one per base and family: 8-bit, float, and the 64-bit ones), created cleared.
+-ImagenDk* RenderDk::ImagenColor(uint32_t base, uint32_t formato, uint32_t pitch) {
++ImagenDk* RenderDk::ImagenColor(uint32_t base, uint32_t formato, uint32_t pitch, uint32_t alto_requerido) {
+   if (!pitch) {
+     Rechazar(7, "destino de render con pitch 0");
+     return nullptr;
+@@ -1527,11 +1628,10 @@
+   const uint32_t clase = ((formato == 5 || formato == 7) ? 1u : 0u) | (flotante ? 2u : 0u);
+   const uint64_t clave = (uint64_t(base) << 20) | (uint64_t(clase) << 16) | pitch;
+   if (auto it = destinos_.find(clave); it != destinos_.end()) {
+-    return &it->second;
++    return AsegurarAlturaDestino(it->second, alto_requerido) ? &it->second : nullptr;
+   }
+   // The height from the pitch, as the Vulkan path (nfsmw_nativo_destinos.cpp, ObtenerDestino explains why).
+-  const uint32_t minimo = uint32_t(std::clamp(REXCVAR_GET(deko_altura_minima_destino), 720, int32_t(kAltoMaximoDestino)));
+-  const uint32_t alto = std::min(kAltoMaximoDestino, std::max(minimo, (pitch + 15) & ~15u));
++  const uint32_t alto = AlturaDestino(pitch, alto_requerido, true);
+   ImagenDk imagen;
+   uint32_t flags = DkImageFlags_UsageRender | DkImageFlags_Usage2DEngine;
+   if (REXCVAR_GET(nfsmw_dk_compresion_color)) {
+@@ -1547,6 +1647,7 @@
+   imagen.edram_pitch = pitch;
+   imagen.edram_64 = (clase & 1u) != 0;
+   imagen.clave_edram = clave;
++  imagen.alto_logico = AlturaDestino(pitch, 0, false);
+   ImagenDk& nueva = destinos_.emplace(clave, imagen).first->second;
+   PrepararDestino(nueva);
+   return &nueva;
+@@ -1563,11 +1664,12 @@
+ // A base's colour target for a draw (para_copia false) or a copy (true). A 32-bit base used in both families has two
+ // images (Halo 3's 0x4C0: 7e3 drawings, 2_10_10_10 and 8_8_8_8 ones, copies as 10, 0 and 12): a draw in the other
+ // family first carries the content over (LlevarContenido) and takes the base; a copy reads whichever image holds it.
+-ImagenDk* RenderDk::DestinoColor(uint32_t base, uint32_t formato, uint32_t pitch, bool para_copia) {
++ImagenDk* RenderDk::DestinoColor(uint32_t base, uint32_t formato, uint32_t pitch, bool para_copia,
++                                uint32_t alto_requerido) {
+   static const bool con_flotantes = REXCVAR_GET(deko_destinos_flotantes);
+   const bool de_64 = formato == 5 || formato == 7;
+   if (!con_flotantes || de_64 || !pitch) {
+-    return ImagenColor(base, formato, pitch);
++    return ImagenColor(base, formato, pitch, alto_requerido);
+   }
+   const uint64_t clave_base = (uint64_t(base) << 20) | pitch;
+   ImagenDk* propietaria = nullptr;
+@@ -1577,9 +1679,10 @@
+     }
+   }
+   if (para_copia && propietaria) {
+-    return propietaria;
+-  }
+-  ImagenDk* imagen = ImagenColor(base, formato, pitch);
++    return AsegurarAlturaDestino(*propietaria, alto_requerido) ? propietaria : nullptr;
++  }
++  ImagenDk* imagen = ImagenColor(base, formato, pitch,
++                                 std::max(alto_requerido, propietaria ? propietaria->alto : 0u));
+   if (!imagen) {
+     return nullptr;
+   }
+@@ -1621,17 +1724,16 @@
+   }
+ }
+ 
+-ImagenDk* RenderDk::DestinoProfundidad(uint32_t base, uint32_t formato, uint32_t pitch) {
++ImagenDk* RenderDk::DestinoProfundidad(uint32_t base, uint32_t formato, uint32_t pitch, uint32_t alto_requerido) {
+   if (!pitch) {
+     Rechazar(11, "sin destino de profundidad (pitch 0)");
+     return nullptr;
+   }
+   const uint64_t clave = (uint64_t(base) << 20) | (uint64_t(formato) << 16) | pitch;
+   if (auto it = profundidades_.find(clave); it != profundidades_.end()) {
+-    return &it->second;
+-  }
+-  const uint32_t minimo = uint32_t(std::clamp(REXCVAR_GET(deko_altura_minima_destino), 720, int32_t(kAltoMaximoDestino)));
+-  const uint32_t alto = std::min(kAltoMaximoDestino, std::max(minimo, (pitch + 15) & ~15u));
++    return AsegurarAlturaDestino(it->second, alto_requerido) ? &it->second : nullptr;
++  }
++  const uint32_t alto = AlturaDestino(pitch, alto_requerido, true);
+   ImagenDk imagen;
+   // Both guest depth formats (24-bit fixed and float) as D24S8, as the Vulkan path does on the console. No
+   // compression: untested on deko3d, and copies broke it on nouveau (HowToDeko3d.md, section 5.10).
+@@ -1642,6 +1744,7 @@
+     return nullptr;
+   }
+   REXLOG_INFO("[deko3d] destino de profundidad base {:03X}, formato {}, {}x{}", base, formato, pitch, alto);
++  imagen.alto_logico = AlturaDestino(pitch, 0, false);
+   ImagenDk& nueva = profundidades_.emplace(clave, imagen).first->second;
+   PrepararDestino(nueva);
+   return &nueva;
+@@ -1928,7 +2031,8 @@
+   }
+   // A 4x MSAA surface's pixels are 2x2 samples of the image at twice the pitch (Dibujar): the rectangle is in pixels.
+   const uint32_t muestras = ((reg.rb_surface_info >> 16) & 0x3) == 2 ? 2 : 1;
+-  ImagenDk* destino_render = DestinoColor(info_color & 0xFFF, formato_color, pitch * muestras, true);
++  ImagenDk* destino_render = DestinoColor(info_color & 0xFFF, formato_color, pitch * muestras, true,
++                                         uint32_t(std::max(y1, 0)) * muestras);
+   // What a 4x pass drew there is read from its companion by the resolve (Copiar3D), or unpacked before anything else
+   // reads or writes the sample-space image (TraerBaldosas, a pending clear, the band: EscribirMuestras).
+   const MotivoMs motivo(ms_motivo_, 3);
+@@ -2371,7 +2475,8 @@
+   ++copias_profundidad_;
+   // A 4x MSAA depth buffer is the image at twice the pitch (sample space, Dibujar); the rectangle is in pixels.
+   const uint32_t muestras = ((reg.rb_surface_info >> 16) & 0x3) == 2 ? 2 : 1;
+-  ImagenDk* profundidad = DestinoProfundidad(info & 0xFFF, (info >> 16) & 0x1, pitch * muestras);
++  ImagenDk* profundidad = DestinoProfundidad(info & 0xFFF, (info >> 16) & 0x1, pitch * muestras,
++                                            uint32_t(std::max(y1, 0)) * muestras);
+   if (!profundidad) {
+     franjas_profundidad_.Reset();
+     return;
+@@ -2444,7 +2549,8 @@
+   TerminarPase();
+   // What is resolved must be the target's real content: a swap may have taken it away, a clear may be pending, the
+   // useful area grows to what is read.
+-  LeerMuestras(*profundidad);
++  // Copiar3D can read sample zero directly from the newer 4x companion.
++  // Restores, pending clears and dirty bands below still materialize when needed.
+   RestaurarContenido(*profundidad, true);
+   if (y1 > 0) {
+     profundidad->alto_usado =
+@@ -2932,6 +3038,23 @@
+   }
+   const deko::Compilador::Resultado z = compilador_.Compilar(false, kFsCopiaProfundidad);
+   fs_copia_profundidad_valido_ = z.ok && nucleo_.CargarShader(fs_copia_profundidad_, z.dksh, "copia de profundidad");
++  {
++    std::string fuente = kFsCopiaProfundidad;
++    fuente.insert(fuente.find('\n') + 1, "#define ORIGEN_MS 1\n");
++    const deko::Compilador::Resultado ms = compilador_.Compilar(false, fuente);
++    fs_copia_profundidad_ms_valido_ = ms.ok &&
++        nucleo_.CargarShader(fs_copia_profundidad_ms_, ms.dksh, "copia de profundidad desde 4x");
++    if (!fs_copia_profundidad_ms_valido_) {
++      REXLOG_WARN("[deko3d] sin resolve de profundidad desde 4x ({}): se desempaqueta antes", ms.log);
++    }
++    fuente = kFsCopiaProfundidad;
++    fuente.insert(fuente.find('\n') + 1, "#define COPIAR_ESTENCIL 1\n");
++    const deko::Compilador::Resultado zs = compilador_.Compilar(false, fuente);
++    fs_copia_zs_valido_ = zs.ok && nucleo_.CargarShader(fs_copia_zs_, zs.dksh, "copia exacta de profundidad y estencil");
++    if (!fs_copia_zs_valido_) {
++      REXLOG_WARN("[deko3d] sin copia exacta de profundidad/estencil ({}): alturas tradicionales", zs.log);
++    }
++  }
+   if (!fs_copia_color_valido_ || !fs_copia_profundidad_valido_) {
+     REXLOG_ERROR("[deko3d] no se pudieron compilar las copias en el motor 3D ({} / {}): se copia con el motor de copias",
+                  color.log, z.log);
+--- a/src/x360/deko/dibujos.cpp
++++ b/src/x360/deko/dibujos.cpp
+@@ -32,6 +32,7 @@
+ #include <rex/ui/deko3d/glsl.h>
+ #include <rex/ui/switch_perf_hooks.h>
+ #include <rex/x360/deko/render.h>
++#include <rex/x360/deko/target_extent.h>
+ #include <rex/x360/deko/msaa_select.h>
+ #include <rex/x360/deko/minininjas_full_frame.h>
+ #include <rex/x360/deko/storage_buffer_eden.h>
+@@ -785,19 +786,21 @@
+ 
+ // ---- Render targets of a draw. Nothing to close or open: binding others is all a pass change costs.
+ 
+-bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch, bool virtual_full_frame) {
++bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch, bool virtual_full_frame, uint32_t alto_requerido) {
+   TerminarPase();  // the deferred sky belongs to the pass that ends here
+   std::array<ImagenDk*, 5> imagenes{};
+   for (uint32_t i = 0; i < 4; ++i) {
+     if (claves[i]) {
+-      imagenes[i] = DestinoColor(uint32_t(claves[i] >> 24) & 0xFFF, uint32_t(claves[i] >> 16) & 0xF, pitch);
++      imagenes[i] = DestinoColor(uint32_t(claves[i] >> 24) & 0xFFF, uint32_t(claves[i] >> 16) & 0xF, pitch,
++                                 false, alto_requerido);
+       if (!imagenes[i]) {
+         return Rechazar(40, "no hay destino de color");
+       }
+     }
+   }
+   if (claves[4]) {
+-    imagenes[4] = DestinoProfundidad(uint32_t(claves[4] >> 24) & 0xFFF, uint32_t(claves[4] >> 16) & 0x1, pitch);
++    imagenes[4] = DestinoProfundidad(uint32_t(claves[4] >> 24) & 0xFFF, uint32_t(claves[4] >> 16) & 0x1, pitch,
++                                     alto_requerido);
+     if (!imagenes[4]) {
+       return Rechazar(41, "no hay destino de profundidad");
+     }
+@@ -1952,9 +1955,13 @@
+   }
+ 
+   // --- Render targets
++  const uint32_t alto_requerido = target_extent::DrawHeight(r[gr::XE_GPU_REG_RB_SURFACE_INFO],
++      r[gr::XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL], r[gr::XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR],
++      r[gr::XE_GPU_REG_PA_SC_WINDOW_OFFSET]);
+   if (!solo_exportar && (!g_.pase_valido || g_.pase_virtual_full_frame != virtual_full_frame ||
+-                         std::memcmp(g_.pase, claves, sizeof(claves)) != 0)) {
+-    if (!EmpezarPase(claves, pitch, virtual_full_frame)) {
++                         std::memcmp(g_.pase, claves, sizeof(claves)) != 0 ||
++                         (AlturaAjustada() && alto_requerido > g_.pase_alto * (ms_activo_ ? 2u : 1u)))) {
++    if (!EmpezarPase(claves, pitch, virtual_full_frame, alto_requerido)) {
+       return false;
+     }
+   }
+@@ -2867,11 +2874,13 @@
+       ((claves[0] >> 16) & 0xF) == 0 &&
+       uint32_t((claves[0] >> 24) & 0xFFF) == (r[gr::XE_GPU_REG_RB_DEPTH_INFO] & 0xFFF) && imagenes_pase_[0]) {
+     const uint32_t info_z = r[gr::XE_GPU_REG_RB_DEPTH_INFO];
+-    if (ImagenDk* z = DestinoProfundidad(info_z & 0xFFF, (info_z >> 16) & 0x1, pitch)) {
+-      DkScissor rect = tijera;
+-      if (ms_activo_) {  // the restore works in sample space (it ends the pass first)
+-        rect = {rect.x * 2, rect.y * 2, rect.width * 2, rect.height * 2};
+-      }
++    // A target growth can close the MSAA pass; capture its coordinate scale first.
++    DkScissor rect = tijera;
++    if (ms_activo_) {
++      rect = {rect.x * 2, rect.y * 2, rect.width * 2, rect.height * 2};
++    }
++    if (ImagenDk* z = DestinoProfundidad(info_z & 0xFFF, (info_z >> 16) & 0x1, pitch,
++                                       rect.y + rect.height)) {
+       RestaurarEstencil(*imagenes_pase_[0], *z, rect);
+     }
+   }
+--- a/include/rex/x360/deko/render.h
++++ b/include/rex/x360/deko/render.h
+@@ -103,6 +103,7 @@
+   // clear covered; banda_sucia: the rows below hold what was there before it, and are cleared to the same value before
+   // anything reaches them (CompletarBanda), so the result is exactly a whole clear.
+   uint32_t alto_usado = 0;
++  uint32_t alto_logico = 0;  // legacy extent: a partial fast clear must not become a whole clear after compaction
+   uint32_t alto_borrado = 0;
+   bool banda_sucia = false;
+   // A 4x MSAA target (sample space, 2x2 samples a pixel) bound through its real 4x companion (deko_msaa_real): the
+@@ -261,13 +262,16 @@
+   // `muestras` (depth only): samples per pixel along each axis of a 4x MSAA source in sample space; x0/y0 stay in
+   // pixels and each pixel takes its sample 0.
+   bool Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32_t ancho, uint32_t alto, ImagenDk& destino,
+-                uint32_t dx, uint32_t dy, int32_t modo = kCopiaValor, float escala = 1.0f, uint32_t muestras = 1);
++                uint32_t dx, uint32_t dy, int32_t modo = kCopiaValor, float escala = 1.0f, uint32_t muestras = 1,
++                bool copiar_estencil = false);
+   bool rop_sin_barrera_ = true;
+   bool copia3d_pendiente_ = false;
+   uint64_t copias_3d_ = 0, barreras_fragmentos_ = 0, contenidos_llevados_ = 0;
+   DkShader fs_copia_color_{}, fs_copia_profundidad_{}, fs_estencil_{}, fs_estencil_exportado_{};
+   bool fs_copia_color_valido_ = false, fs_copia_profundidad_valido_ = false, fs_estencil_valido_ = false;
+   bool fs_estencil_exportado_valido_ = false;  // the whole byte in one pass (gl_FragStencilRefARB)
++  DkShader fs_copia_profundidad_ms_{}, fs_copia_zs_{};
++  bool fs_copia_profundidad_ms_valido_ = false, fs_copia_zs_valido_ = false;
+   // Halo 3 draws its stencil (an 8x8 dither pattern, objects' fade levels test against it) as the red byte of 8_8_8_8
+   // colour at the depth buffer's EDRAM base. With separate images, that red byte is carried into the depth image's
+   // stencil here, a bit per pass (no stencil export): the rectangle drawn.
+@@ -277,10 +281,14 @@
+ 
+   // ---- Render targets and resolved textures (nfsmw_dk_destinos.cpp)
+   // para_copia: the image holding the base's content, whichever family (see propietario_).
+-  ImagenDk* DestinoColor(uint32_t base, uint32_t formato, uint32_t pitch, bool para_copia = false);
+-  ImagenDk* ImagenColor(uint32_t base, uint32_t formato, uint32_t pitch);
++  ImagenDk* DestinoColor(uint32_t base, uint32_t formato, uint32_t pitch, bool para_copia = false,
++                         uint32_t alto_requerido = 0);
++  ImagenDk* ImagenColor(uint32_t base, uint32_t formato, uint32_t pitch, uint32_t alto_requerido = 0);
+   bool EsDestinoFlotante(uint32_t formato) const;
+-  ImagenDk* DestinoProfundidad(uint32_t base, uint32_t formato, uint32_t pitch);
++  ImagenDk* DestinoProfundidad(uint32_t base, uint32_t formato, uint32_t pitch, uint32_t alto_requerido = 0);
++  bool AlturaAjustada() const;
++  uint32_t AlturaDestino(uint32_t pitch, uint32_t requerida, bool ajustar) const;
++  bool AsegurarAlturaDestino(ImagenDk& imagen, uint32_t requerida);
+   // The resolved texture at that address, if one exists and has content.
+   const ImagenDk* TexturaResuelta(uint32_t direccion);
+   // The one of that size when several were resolved to the address (resueltas_otras_), else as above.
+@@ -430,7 +438,7 @@
+   bool CalcularEntrada(const PeticionDibujo& p, EntradaVerticesDk& entrada);
+   uint32_t CalcularEncuadre(const uint32_t* r, uint32_t vte, bool sin_recorte, uint32_t modo_sc, float viewport[6],
+                             float ndc[4], DkScissor& tijera);
+-  bool EmpezarPase(const uint64_t claves[5], uint32_t pitch, bool virtual_full_frame);
++  bool EmpezarPase(const uint64_t claves[5], uint32_t pitch, bool virtual_full_frame, uint32_t alto_requerido);
+   // The DKSH of a library shader for that specialization value (masked) and, for a vertex shader, the
+   // interpolators it keeps. nullptr if it cannot be had (logged once).
+   // `variante_ps` (pixel shaders): kVariante* flags (nfsmw_dk_dibujos.cpp), part of the DKSH cache key; 0 is the
+--- /dev/null
++++ b/include/rex/x360/deko/target_extent.h
+@@ -0,0 +1,34 @@
++#pragma once
++
++#include <algorithm>
++#include <cstdint>
++
++namespace rex::x360::target_extent {
++
++// Keep allocation in sample rows, independently of native/sample-space drawing.
++constexpr uint32_t Height(uint32_t required) {
++  return (std::clamp(required, 32u, 2048u) + 31u) & ~31u;
++}
++
++constexpr uint32_t DrawHeight(uint32_t surface, uint32_t top_left,
++                              uint32_t bottom_right, uint32_t window_offset) {
++  int32_t bottom = int32_t((bottom_right >> 16) & 0x3FFFu);
++  if (!(top_left & 0x80000000u)) {
++    const uint32_t raw = (window_offset >> 16) & 0x7FFFu;
++    bottom += raw < 0x4000u ? int32_t(raw) : int32_t(raw) - 0x8000;
++  }
++  const uint32_t scale = ((surface >> 16) & 3u) == 2u ? 2u : 1u;
++  return std::min(uint32_t(std::max(bottom, 0)) * scale, 2048u);
++}
++
++// x/y are in sample rows for colour, but in pixels for the depth copy shader.
++constexpr bool Direct4x(bool depth, uint32_t samples, uint32_t x, uint32_t y,
++                        uint32_t width, uint32_t height, uint32_t source_width,
++                        uint32_t valid_rows) {
++  if (samples != 2 || !width || !height || (!depth && ((x | y) & 1u))) return false;
++  const uint64_t right = (depth ? uint64_t(x) * 2 : x) + uint64_t(width) * 2;
++  const uint64_t bottom = (depth ? uint64_t(y) * 2 : y) + uint64_t(height) * 2;
++  return right <= source_width && bottom <= valid_rows;
++}
++
++}  // namespace rex::x360::target_extent

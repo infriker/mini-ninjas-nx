@@ -87,6 +87,34 @@ commands or establish a console FPS improvement. The published 1.0.7 has the
 same executable code as the Switch-tested 1.0.7-rc.2, with only the NACP display
 version changed. Modified builds still require console testing.
 
+For the 1.0.8 MSAA/target-size changes, also run
+`python3 tools/test_gpu_msaa_extents.py` in the build container. It needs the
+host C++ compiler and devkitPro's `uam`; `UAM` can override the compiler path.
+See [performance.md](performance.md#v108-gpu-optimizations) for
+the changed paths and their console-test limitations.
+
+For the 1.0.8 grass shader, the test requires the separately obtained release
+shader library, a host C++ compiler, and SPIR-V Tools. It extracts two modules
+into a temporary build directory; no game shader is embedded in the tests:
+
+```sh
+mkdir -p build/foliage-test
+g++ -std=c++20 -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -no-pie \
+  -Isrc -Ishaders -Isdk/thirdparty/xxHash tools/test_foliage_shader.cpp \
+  shaders/ds_shader_library.cpp -o build/foliage-test/check
+build/foliage-test/check /path/to/minininjas_shaders.dslib build/foliage-test
+spirv-val build/foliage-test/grass-original.spv
+spirv-val build/foliage-test/grass-patched.spv
+python3 tools/test_foliage_shader.py build/foliage-test/grass-original.spv \
+  build/foliage-test/grass-patched.spv
+```
+
+The tests compare the original module's control flow and output against the
+production patch, check incompatible/truncated modules and all other library
+entries, and verify that the cache key changes. Texture sample values are
+inputs to the interpreter; GPU filtering and console frame times are not
+simulated.
+
 ### CPU builds and on-console profiling
 
 The release build uses bounded GCC LTO on the translated game functions. Set

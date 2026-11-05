@@ -2,12 +2,81 @@
 
 | Gameplay on Nintendo Switch | CPU clock | GPU clock | `minininjas_fps_limit` |
 |---|---|---|---|
-| 25–30 FPS, depending on the scene | Stock | Stock | `30` (default) |
-| Stable 30 FPS | 1224 MHz | Stock | `30` |
+| Nearly stable 30 FPS | 1020 MHz | 307 MHz | `30` (default) |
+| Stable 30 FPS | 1020 MHz | 460 MHz | `30` |
 | 60 FPS target | 1785 MHz | 614 MHz | `0` (uncapped) |
 
+The 30 FPS results were reported during Nintendo Switch testing of the final
+1.0.8 release candidate. The existing 60 FPS clock settings are retained.
 Set the clocks on the console. To change the frame limit, edit
 `minininjas.toml` beside the NRO and restart the game.
+
+## v1.0.8 GPU optimizations
+
+Version 1.0.8 retains **1280×720**, **4× MSAA**, all v1.0.7 GPU optimizations,
+and the existing profile-use/LTO CPU build without recording or diagnostic
+profiling. The final candidate, **1.0.8-rc.3**, was tested on Nintendo Switch.
+The stable NRO has identical executable code and differs only in its NACP
+display version. The clock settings above reflect the reported gameplay
+results; there is no isolated FPS measurement for each individual change.
+
+- Native 4× MSAA selection now starts at a sample-space pitch of **160**,
+  previously 640. The shader and attachment compatibility checks remain in
+  place. An explicit `deko_msaa_minimo_pitch_muestras` in the adjacent TOML
+  can override this default; restart after changing it. Smaller compatible
+  passes can use hardware MSAA instead of shading the 2×2 sample grid.
+  Additional MSAA pack/unpack work can still affect the benefit.
+- Depth resolves can read sample zero directly from the current native MSAA
+  image. The old path unpacked the 2×2 sample grid and then fetched its
+  top-left sample. Cropped source/destination offsets and valid sample rows
+  are checked; clears, restores, missing shaders or unavailable rows retain
+  the old materialization path. The existing D24S8 representation and resolve
+  stencil behavior are unchanged. This is not a new universal implementation
+  of every Xenos depth/stencil resolve mode.
+- Targets allocate the rows requested by a draw scissor or resolve, rounded
+  to 32 sample rows, and grow when later operations need more. Growth preserves
+  color or both depth and stencil, including pending clears, resolved-away
+  content and newer MSAA samples. Old images retire through the existing GPU
+  lifetime mechanism. The original logical extent remains available so a
+  partial fast clear cannot accidentally become a whole clear. The legacy
+  allocation path remains the fallback when exact depth/stencil copying is
+  unavailable or EDRAM tile ownership is enabled.
+- The verified Scatter grass pixel shader (`39F26D870020FECC`) removes
+  constant alpha-comparison branches left by uam and performs the same alpha
+  test before colour/fog arithmetic. Texture sampling, alpha reference and
+  fade, RGB arithmetic, blending, depth/stencil writes and draw order are
+  retained. Unknown shader revisions keep their original module. The patched
+  SPIR-V uses a separate shader-cache key, so an existing cache can be reused.
+
+The grass optimization is enabled by default. For a comparison, set
+`minininjas_foliage_fast_alpha = false` in the TOML beside the NRO and restart.
+An existing TOML does not need updating. The first encounter can compile the
+new cache variant. This uses shader discard, not forced early depth writes
+through transparent texels; overlapping grass still incurs texture/shading
+and blend/depth work.
+
+For a 1280×720 four-sample scene, the sample-space allocation can now be
+2560×1440 instead of 2560×2048, with the companion correspondingly reduced
+from 1280×1024 to 1280×720. This is an allocation calculation, not a measurement
+of total GPU memory or frame time; other passes may require larger extents.
+
+`python3 tools/test_gpu_msaa_extents.py` exercises production copy/growth
+control flow with CPU images under AddressSanitizer/UBSan and compiles the
+three depth-copy GLSL variants to Maxwell DKSH with uam. It covers cropped
+resolves against the old unpack path, stencil retention, pending clears,
+growth, allocation failure, sample-row bounds and the selection thresholds.
+It complements the v1.0.7 clear/lifetime and shader-guard tests; none of these
+host checks establishes the performance or visual result on Switch.
+
+Grass validation covers 54,848 original/patched SPIR-V discard/RGBA cases,
+all eight comparisons, enabled/disabled alpha testing, fade and threshold
+edges, random floats, infinities and NaNs. All 18 original/patched variants
+compile with uam. The captured GREATER-alpha variant shrinks from 512 to 384
+bytes of Maxwell code; that size reduction is not an FPS measurement.
+Replaying saved grass frame 3267 produced byte-identical colour and depth
+snapshots, including final colour, against the captured shader. This desktop
+replay uses the older sample-space frame and complements the final candidate's
+native-MSAA console test.
 
 ## v1.0.7 GPU optimizations
 

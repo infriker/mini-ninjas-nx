@@ -89,7 +89,7 @@ void dkCmdBufCopyImage(DkCmdBuf c, const DkImageView* a, const DkImageRect* ar,
 }
 struct ImagenDk {
   DkImage imagen; uint64_t serie = 1;
-  uint32_t ancho = 8, alto = 16, alto_usado = 8, alto_borrado = 0;
+  uint32_t ancho = 8, alto = 16, alto_usado = 8, alto_borrado = 0, alto_logico = 0;
   uint32_t edram_base = 0, edram_pitch = 8, ms_filas = 0;
   bool profundidad = false, viva = true, edram_64 = false;
   int formato = 0; bool intercambio_rb = false;
@@ -124,9 +124,10 @@ struct RenderDk {
   void AsegurarTrabajo() {} void TerminarPase() {} void AntesDe3D() {} void AntesDeTransferir() {}
   void OlvidarEstado() {} void MarcarGpu(unsigned) {} void SombraMinimoAntesDeBorrar(ImagenDk&) {}
   void EscribirMuestras(ImagenDk&) {}
+  bool AsegurarAlturaDestino(ImagenDk&, uint32_t) { return true; }  // growth has its own image tests
   ImagenDk* DestinoProfundidad(unsigned, unsigned, unsigned) { return depth; }
   bool Copiar3D(const ImagenDk&, uint32_t, uint32_t, uint32_t, uint32_t, ImagenDk&, uint32_t, uint32_t,
-                int32_t = 0, float = 1, uint32_t = 1);
+                int32_t = 0, float = 1, uint32_t = 1, bool = false);
   void BorrarProfundidad(const RegistrosCopia&, uint32_t);
   void HacerBorradoPendiente(ImagenDk&);
   uint32_t AltoDeBorrado(const ImagenDk&) const;
@@ -203,6 +204,19 @@ int main() {
   assert(cleared.borrado_pendiente && fast.borrado_previo_.empty());
   fast.HacerBorradoPendiente(cleared);
   rows(pixels,0,16,0);
+
+  // Covering only the compact allocation must not change the implicit clear
+  // value of rows that may be allocated later.
+  RenderDk compact; Pixels compact_pixels; ImagenDk compact_target;
+  compact_target.imagen.pixels = &compact_pixels;
+  compact_target.alto_logico = 32;
+  compact_target.borrado_pendiente = true;
+  compact.destinos_[1] = compact_target;
+  compact.memory.vertices = fast.memory.vertices;
+  assert(compact.BorradoRapidoD3D(regs,3));
+  assert(!compact.destinos_[1].borrado_pendiente);
+  assert(compact.destinos_[1].borrado_color[0] == 1);
+  rows(compact_pixels,0,16,0);
 
   // A direct front presentation keeps a snapshot alive for a subsequent read
   // or clear. The read gets the previous colour before the target is cleared.

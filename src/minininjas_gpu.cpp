@@ -87,6 +87,7 @@
 
 REXCVAR_DECLARE(bool, nfsmw_sombras_sin_vegetacion);
 REXCVAR_DECLARE(int32_t, deko_altura_minima_destino);
+REXCVAR_DECLARE(bool, deko_altura_destino_ajustada);
 REXCVAR_DECLARE(bool, deko_resolver_cuatro_franjas);
 REXCVAR_DECLARE(bool, nfsmw_nativo_ps_solo_alfa);
 REXCVAR_DECLARE(bool, nfsmw_nativo_saltar_invisibles);
@@ -228,6 +229,9 @@ class RingGraphicsSystem final : public rex::system::IGraphicsSystem {
     REXCVAR_SET(nfsmw_sombras_sin_vegetacion, false);
     // 4x title-scene tiles can be 720 guest pixels tall (1440 samples).
     REXCVAR_SET(deko_altura_minima_destino, 1440);
+    // Allocate only the requested sample rows, retaining the legacy extent for
+    // full-clear detection and as a fallback if lossless growth is unavailable.
+    REXCVAR_SET(deko_altura_destino_ajustada, true);
     REXCVAR_SET(deko_resolver_cuatro_franjas, true);
     REXCVAR_SET(nfsmw_nativo_ps_solo_alfa, false);
     REXCVAR_SET(nfsmw_nativo_saltar_invisibles, false);
@@ -256,7 +260,9 @@ class RingGraphicsSystem final : public rex::system::IGraphicsSystem {
     if (rex::cvar::GetFlagSource("deko_partial_submit_draws") == rex::cvar::Source::kDefault) {
       REXCVAR_SET(deko_partial_submit_draws, 128);
     }
-    REXCVAR_SET(deko_msaa_minimo_pitch_muestras, 640);
+    if (rex::cvar::GetFlagSource("deko_msaa_minimo_pitch_muestras") == rex::cvar::Source::kDefault) {
+      REXCVAR_SET(deko_msaa_minimo_pitch_muestras, 160);
+    }
     REXCVAR_SET(deko_minininjas_full_frame, true);
     REXCVAR_SET(deko_minininjas_full_frame_depth_info, 0xB40);
     REXCVAR_SET(nfsmw_nativo_huellas_muestreo, 0);

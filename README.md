@@ -38,28 +38,33 @@ provide enough memory. The Windows PC version is not supported.
     ...
 ```
 
-To update a v1.0.3–v1.0.6 or v1.0.7 release-candidate installation, replace
+To update a v1.0.3–v1.0.7 or v1.0.8 release-candidate installation, replace
 `sdmc:/switch/mini-ninjas/mini-ninjas.nro` with the NRO from the
 [latest release](https://github.com/infriker/mini-ninjas-nx/releases/latest).
 For manual installation and save locations, see [installation](docs/installing.md).
 
 ## Performance
 
-The v1.0.7 release reduces GPU work with deferred and useful-area render-target
-clears, compatible resolve/copy elimination, early depth tests for suitable
-effects, and removal of unnecessary fragment-shader work in eligible passes.
-It retains 1280×720, hardware 4× MSAA and the v1.0.6 CPU optimizations.
-The release candidate was tested on Switch with smoother gameplay and no
-visual artifacts reported. See [GPU optimizations](docs/performance.md#v107-gpu-optimizations)
-for the conditions and validation, and [CPU profile](docs/performance.md#v106-gameplay-profile)
-for the existing PGO/LTO improvements. Gameplay profiling remains disabled.
+Version **1.0.8** reduces GPU work in smaller MSAA passes, depth resolves and
+render-target allocation, and simplifies the grass shader's transparency
+test. It retains **1280×720**, **4× MSAA**, the previous clear/copy and fragment
+optimizations, and the v1.0.6 CPU optimizations. The final release candidate
+was tested on Nintendo Switch; the stable NRO changes only its displayed
+version. Gameplay profiling remains disabled.
 
-On Nintendo Switch, gameplay runs at **25–30 FPS at stock clocks**, depending
-on the scene. For a stable **30 FPS**, set the CPU to **1224 MHz** and keep
-the default 30 FPS limit. For **60 FPS**, set the CPU to **1785 MHz** and the
-GPU to **614 MHz**, then set `minininjas_fps_limit = 0` in `minininjas.toml`
-beside the NRO and restart the game.
-See [frame-limit settings](docs/installing.md#frame-limit).
+| Gameplay on Nintendo Switch | CPU clock | GPU clock | `minininjas_fps_limit` |
+|---|---|---|---|
+| Nearly stable 30 FPS | 1020 MHz | 307 MHz | `30` (default) |
+| Stable 30 FPS | 1020 MHz | 460 MHz | `30` |
+| 60 FPS target | 1785 MHz | 614 MHz | `0` (uncapped) |
+
+The 30 FPS results were reported during on-console testing of this release.
+Set the clocks on the console. For 60 FPS, set `minininjas_fps_limit = 0` in
+`minininjas.toml` beside the NRO and restart the game; see
+[frame-limit settings](docs/installing.md#frame-limit).
+See [GPU optimizations](docs/performance.md#v108-gpu-optimizations) for the
+changes and validation, and [CPU profile](docs/performance.md#v106-gameplay-profile)
+for the PGO/LTO improvements.
 
 - Main scene rendered at **1280×720** with **hardware 4× MSAA**.
 - One full-screen scene region instead of the original four 320-pixel strips.

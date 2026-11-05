@@ -19,6 +19,7 @@
 #include <unordered_map>
 
 #include <rex/logging.h>
+#include <rex/cvar.h>
 #include <rex/memory/utils.h>
 #include <rex/system/xmemory.h>
 
@@ -27,6 +28,9 @@
 #define XXH_FORCE_MEMORY_ACCESS 0
 #define XXH_INLINE_ALL
 #include <xxhash.h>
+#include "minininjas_foliage_spirv.h"
+
+REXCVAR_DECLARE(bool, minininjas_foliage_fast_alpha);
 
 #if MINININJAS_FULL_FRAME
 #include "minininjas_water_spirv.h"
@@ -234,6 +238,7 @@ struct Biblioteca::Datos {
   std::unordered_map<uint64_t, const EntradaShader*> aprendidas;     // Huella(patched microcode)
   std::unordered_map<uint64_t, const EntradaShader*> por_microcodigo;  // step 3 results, nullptr included
   std::vector<uint32_t> temporal;
+  std::vector<uint32_t> foliage_spirv;  // owns the patched span for the renderer's lifetime
 #if MINININJAS_FULL_FRAME
   // EntradaShader stores spans: each patched module must outlive the renderer.
   std::array<std::vector<uint32_t>, 2> water_spirv;
@@ -270,6 +275,14 @@ bool Biblioteca::Cargar(const std::filesystem::path& archivo) {
     if (const char* motivo = Leer(shaders[i], e)) {
       if (++ignorados <= 8) REXLOG_WARN("[shaders] container {} skipped: {}", i, motivo);
       continue;
+    }
+    if (!e.vertices && REXCVAR_GET(minininjas_foliage_fast_alpha)) {
+      const auto result = foliage::Patch(e.huella_contenedor, e.spirv, d.foliage_spirv);
+      if (result == foliage::Result::Applied) {
+        e.spirv = d.foliage_spirv;  // its SPIR-V hash also selects a separate DKSH cache entry
+      } else if (result == foliage::Result::Rejected) {
+        REXLOG_WARN("[shaders] foliage shader differs from the verified version; retaining original");
+      }
     }
 #if MINININJAS_FULL_FRAME
     if (!e.vertices && (e.huella_contenedor == 0x6A90B5F4EDDA9DA3ull ||
